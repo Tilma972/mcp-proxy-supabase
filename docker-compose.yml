@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  supabase-mcp-proxy:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      SUPABASE_PROJECT_REF: ${SUPABASE_PROJECT_REF}
+      SUPABASE_PAT: ${SUPABASE_PAT}
+      X_PROXY_KEY: ${X_PROXY_KEY}
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-*}
+      RATE_LIMIT: ${RATE_LIMIT:-200/minute}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
