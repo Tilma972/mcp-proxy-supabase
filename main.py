@@ -95,13 +95,17 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 # AUTH MIDDLEWARE
 # ============================================================================
 
-def verify_proxy_key(x_proxy_key: Optional[str] = Header(None)):
-    """Verify X-Proxy-Key header"""
-    if x_proxy_key != settings.x_proxy_key:
-        logger.warning("auth_failed", provided_key=x_proxy_key[:8] if x_proxy_key else None)
+def verify_proxy_key(
+    x_proxy_key: Optional[str] = Header(None),
+    key: Optional[str] = None  # Permet de passer la clé via ?key=...
+):
+    """Verify X-Proxy-Key header or query parameter"""
+    provided_key = x_proxy_key or key
+    if provided_key != settings.x_proxy_key:
+        logger.warning("auth_failed", provided_key=provided_key[:8] if provided_key else None)
         raise HTTPException(
             status_code=403,
-            detail="Invalid or missing X-Proxy-Key header"
+            detail="Invalid or missing Proxy Key"
         )
     return True
 
