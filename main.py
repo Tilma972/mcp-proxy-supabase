@@ -26,6 +26,9 @@ class Settings(BaseSettings):
     """Application settings with validation"""
     supabase_project_ref: str
     supabase_pat: str
+    supabase_mcp_base_url: str = "https://mcp.supabase.com"
+    supabase_url: Optional[str] = None
+    supabase_api_key: Optional[str] = None
     
     # Auth
     x_proxy_key: str  # Secret key pour authentifier les clients
@@ -150,19 +153,41 @@ async def proxy_mcp(
         content_type=request.headers.get("content-type")
     )
     
+    rest_prefixes = ("rest/", "auth/", "storage/", "functions/", "realtime/")
+    is_rest = path.startswith(rest_prefixes)
+
     # Build upstream request
-    headers = {
-        "Authorization": f"Bearer {settings.supabase_pat}",
-        "Content-Type": "application/json",
-        **{k: v for k, v in request.headers.items() 
-           if k.lower() not in ["host", "authorization", "x-proxy-key"]}
-    }
+    if is_rest:
+        if not settings.supabase_api_key:
+            logger.warning("supabase_api_key_missing", path=path)
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": "Missing SUPABASE_API_KEY for REST requests",
+                    "hint": "Set SUPABASE_API_KEY (anon or service role) and optionally SUPABASE_URL"
+                }
+            )
+        base_url = settings.supabase_url or f"https://{settings.supabase_project_ref}.supabase.co"
+        supabase_url = f"{base_url.rstrip('/')}/{path}"
+        headers = {
+            "Authorization": f"Bearer {settings.supabase_api_key}",
+            "apikey": settings.supabase_api_key,
+            "Content-Type": "application/json",
+            **{k: v for k, v in request.headers.items() 
+               if k.lower() not in ["host", "authorization", "x-proxy-key", "apikey"]}
+        }
+    else:
+        supabase_url = f"{settings.supabase_mcp_base_url.rstrip('/')}/mcp/{path}"
+        headers = {
+            "Authorization": f"Bearer {settings.supabase_pat}",
+            "Content-Type": "application/json",
+            **{k: v for k, v in request.headers.items() 
+               if k.lower() not in ["host", "authorization", "x-proxy-key"]}
+        }
     
-    supabase_url = f"https://mcp.supabase.com/mcp/{path}"
-    
-    # Inject project_ref if missing
+    # Inject project_ref if missing (MCP only)
     params = dict(request.query_params)
-    if "project_ref" not in path and "project_ref" not in params:
+    if not is_rest and "project_ref" not in path and "project_ref" not in params:
         params["project_ref"] = settings.supabase_project_ref
     
     # Check if SSE request
