@@ -69,6 +69,22 @@ structlog.configure(
 
 logger = structlog.get_logger()
 
+HOP_BY_HOP_HEADERS = {
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailers",
+    "transfer-encoding",
+    "upgrade",
+    "content-length",
+}
+
+
+def filter_response_headers(headers: httpx.Headers) -> dict:
+    return {k: v for k, v in headers.items() if k.lower() not in HOP_BY_HOP_HEADERS}
+
 # ============================================================================
 # APP SETUP
 # ============================================================================
@@ -247,7 +263,7 @@ async def proxy_mcp(
         return Response(
             content=resp.content,
             status_code=resp.status_code,
-            headers=dict(resp.headers)
+            headers=filter_response_headers(resp.headers)
         )
     
     except httpx.TimeoutException:
