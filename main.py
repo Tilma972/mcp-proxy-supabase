@@ -79,6 +79,7 @@ HOP_BY_HOP_HEADERS = {
     "transfer-encoding",
     "upgrade",
     "content-length",
+    "content-encoding",
 }
 
 
