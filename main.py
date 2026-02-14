@@ -347,14 +347,25 @@ async def proxy_mcp(
             )
         
         duration = time.time() - start_time
-        
+
+        # 🆕 AJOUT : Log du contenu de la réponse pour debugging
+        try:
+            response_data = resp.json() if resp.content else None
+            response_preview = str(response_data)[:500] if response_data else "empty"
+            result_count = len(response_data) if isinstance(response_data, list) else 1
+        except:
+            response_preview = resp.content[:500].decode('utf-8', errors='ignore')
+            result_count = "unknown"
+
         logger.info(
             "mcp_request_completed",
             path=path,
             method=method,
             status_code=resp.status_code,
             duration_ms=int(duration * 1000),
-            client_ip=client_ip
+            client_ip=client_ip,
+            result_count=result_count,              # 🆕 Nombre de résultats
+            response_preview=response_preview       # 🆕 Aperçu de la réponse
         )
         
         return Response(
