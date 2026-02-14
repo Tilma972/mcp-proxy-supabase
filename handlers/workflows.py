@@ -151,14 +151,23 @@ async def generate_facture_pdf_handler(params: Dict[str, Any]):
                 "message": "PDF already exists (use force_regenerate=true to regenerate)"
             }
 
-        # Step 3: Generate PDF (document-worker with integrated upload)
-        logger.debug("workflow_step_3_generate_pdf", facture_id=facture_id)
+        # Step 3: Determine template based on payment status
+        payment_status = facture.get("payment_status", "unpaid")
+        template = "facture_acquittee" if payment_status == "paid" else "facture_emise"
+        
+        logger.debug(
+            "workflow_step_3_generate_pdf",
+            facture_id=facture_id,
+            payment_status=payment_status,
+            template=template
+        )
         
         # Call document-worker with upload=true to get direct URL
         pdf_result = await call_document_worker(
             "/generate/facture",
             {
                 "facture_id": facture_id,
+                "template": template,  # facture_emise or facture_acquittee
                 "upload": True,  # Document worker uploads to Supabase directly
                 "bucket": "factures"
             }
@@ -262,11 +271,23 @@ async def send_facture_email_handler(params: Dict[str, Any]):
                     detail="No email address found for this company"
                 )
 
-        # Step 3: Generate PDF
-        logger.debug("workflow_step_3_generate_pdf", facture_id=facture_id)
+        # Step 3: Determine template based on payment status
+        payment_status = facture.get("payment_status", "unpaid")
+        template = "facture_acquittee" if payment_status == "paid" else "facture_emise"
+        
+        logger.debug(
+            "workflow_step_3_generate_pdf",
+            facture_id=facture_id,
+            payment_status=payment_status,
+            template=template
+        )
+        
         pdf_result = await call_document_worker(
             "/generate/facture",
-            {"facture_id": facture_id}
+            {
+                "facture_id": facture_id,
+                "template": template  # facture_emise or facture_acquittee
+            }
         )
 
         # Step 4: Upload PDF
