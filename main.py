@@ -1,16 +1,14 @@
 """
-Supabase MCP Proxy - SSE Optimized with Custom Auth
+Supabase MCP Unified Proxy - SSE Optimized with FlowChat Tools
 Deployed on Coolify VPS for FlowChat MVP
 """
 
-import os
 import time
 from typing import Optional
 
-from fastapi import FastAPI, Request, Response, HTTPException, Header, Depends
+from fastapi import FastAPI, Request, Response, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic_settings import BaseSettings
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
@@ -18,41 +16,20 @@ import httpx
 import structlog
 import uvicorn
 
-# ============================================================================
-# CONFIGURATION
-# ============================================================================
+# Import from new modules
+from config import settings
+from auth import verify_proxy_key, verify_flowchat_mcp_key
+from middleware import RequestIDMiddleware
+from utils.http_client import init_shared_client, close_shared_client
+from tools_registry import dispatch_tool, list_tools, get_tool_info
+from schemas.read_tools import READ_TOOL_SCHEMAS
+from schemas.write_tools import WRITE_TOOL_SCHEMAS
+from schemas.workflow_tools import WORKFLOW_TOOL_SCHEMAS
 
-class Settings(BaseSettings):
-    """Application settings with validation"""
-    supabase_project_ref: str
-    supabase_pat: str
-    supabase_mcp_base_url: str = "https://mcp.supabase.com"
-    supabase_url: Optional[str] = None
-    supabase_api_key: Optional[str] = None
-    
-    # Auth
-    x_proxy_key: str  # Secret key pour authentifier les clients
-    
-    # App
-    environment: str = "production"
-    log_level: str = "INFO"
-    
-    # CORS
-    allowed_origins: str = "*"
-    
-    # Rate limiting
-    rate_limit: str = "200/minute"  # Plus haut pour SSE
-    
-    class Config:
-        env_file = ".env"
-        case_sensitive = False
-
-try:
-    settings = Settings()
-except Exception as e:
-    print(f"❌ Configuration error: {e}")
-    print("Required: SUPABASE_PROJECT_REF, SUPABASE_PAT, X_PROXY_KEY")
-    exit(1)
+# Import handlers to register tools
+import handlers.supabase_read
+import handlers.database_write
+import handlers.workflows
 
 # ============================================================================
 # LOGGING
@@ -106,28 +83,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Request ID tracking
+app.add_middleware(RequestIDMiddleware)
+
 # Rate Limiting
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # ============================================================================
-# AUTH MIDDLEWARE
+# AUTH
 # ============================================================================
-
-def verify_proxy_key(
-    x_proxy_key: Optional[str] = Header(None),
-    key: Optional[str] = None  # Permet de passer la clé via ?key=...
-):
-    """Verify X-Proxy-Key header or query parameter"""
-    provided_key = x_proxy_key or key
-    if provided_key != settings.x_proxy_key:
-        logger.warning("auth_failed", provided_key=provided_key[:8] if provided_key else None)
-        raise HTTPException(
-            status_code=403,
-            detail="Invalid or missing Proxy Key"
-        )
-    return True
+# Auth functions imported from auth.py module
 
 # ============================================================================
 # ROUTES
@@ -139,8 +106,137 @@ async def health():
     return {
         "status": "ok",
         "environment": settings.environment,
-        "version": "1.0.0"
+        "version": "2.0.0",
+        "features": ["supabase_proxy", "flowchat_tools"]
     }
+
+
+# ============================================================================
+# FLOWCHAT MCP TOOL ROUTES
+# ============================================================================
+
+@app.get("/mcp/tools/list")
+@limiter.limit(settings.rate_limit)
+async def mcp_list_tools(
+    request: Request,
+    authenticated: bool = Depends(verify_flowchat_mcp_key)
+):
+    """
+    List all available FlowChat MCP tools
+
+    Returns:
+        List of tools with name, category, and description
+    """
+    logger.info("mcp_tools_list_request", client_ip=request.client.host)
+
+    tools = list_tools()
+
+    logger.info("mcp_tools_list_response", tool_count=len(tools))
+
+    return {
+        "tools": tools,
+        "total": len(tools)
+    }
+
+
+@app.get("/mcp/tools/{tool_name}/schema")
+@limiter.limit(settings.rate_limit)
+async def mcp_get_tool_schema(
+    tool_name: str,
+    request: Request,
+    authenticated: bool = Depends(verify_flowchat_mcp_key)
+):
+    """
+    Get the schema for a specific tool
+
+    Args:
+        tool_name: Name of the tool
+
+    Returns:
+        Tool schema in MCP format
+    """
+    logger.info("mcp_tool_schema_request", tool_name=tool_name, client_ip=request.client.host)
+
+    # Check all schema registries
+    all_schemas = {
+        **READ_TOOL_SCHEMAS,
+        **WRITE_TOOL_SCHEMAS,
+        **WORKFLOW_TOOL_SCHEMAS
+    }
+
+    schema = all_schemas.get(tool_name)
+
+    if not schema:
+        logger.warning("mcp_tool_schema_not_found", tool_name=tool_name)
+        raise HTTPException(status_code=404, detail=f"Tool '{tool_name}' not found")
+
+    logger.info("mcp_tool_schema_response", tool_name=tool_name)
+
+    return schema.to_dict()
+
+
+@app.post("/mcp/tools/call")
+@limiter.limit(settings.rate_limit)
+async def mcp_call_tool(
+    request: Request,
+    authenticated: bool = Depends(verify_flowchat_mcp_key)
+):
+    """
+    Execute a tool call
+
+    Request body:
+        {
+            "tool_name": "search_entreprise_with_stats",
+            "params": {"search_term": "ACME", "limit": 10}
+        }
+
+    Returns:
+        Tool execution result
+    """
+    body = await request.json()
+    tool_name = body.get("tool_name")
+    params = body.get("params", {})
+
+    logger.info(
+        "mcp_tool_call_request",
+        tool_name=tool_name,
+        params_keys=list(params.keys()),
+        client_ip=request.client.host
+    )
+
+    if not tool_name:
+        raise HTTPException(status_code=400, detail="Missing 'tool_name' in request body")
+
+    try:
+        result = await dispatch_tool(tool_name, params)
+
+        logger.info("mcp_tool_call_response", tool_name=tool_name)
+
+        return {
+            "success": True,
+            "tool_name": tool_name,
+            "result": result
+        }
+
+    except ValueError as e:
+        logger.error("mcp_tool_call_not_found", tool_name=tool_name, error=str(e))
+        raise HTTPException(status_code=404, detail=str(e))
+
+    except HTTPException:
+        # Re-raise HTTPExceptions from handlers (e.g., validation errors)
+        raise
+
+    except Exception as e:
+        logger.error(
+            "mcp_tool_call_error",
+            tool_name=tool_name,
+            error=str(e),
+            error_type=type(e).__name__
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Tool execution failed: {str(e)}"
+        )
 
 @app.api_route("/mcp/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
 @limiter.limit(settings.rate_limit)
@@ -289,12 +385,15 @@ async def proxy_mcp(
         )
 
 # ============================================================================
-# STARTUP
+# LIFECYCLE
 # ============================================================================
 
 @app.on_event("startup")
 async def startup_event():
-    """Log startup info"""
+    """Initialize resources on startup"""
+    # Initialize shared HTTP client
+    await init_shared_client()
+
     logger.info(
         "proxy_starting",
         environment=settings.environment,
@@ -302,6 +401,15 @@ async def startup_event():
         rate_limit=settings.rate_limit,
         auth_enabled=True
     )
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Cleanup resources on shutdown"""
+    # Close shared HTTP client
+    await close_shared_client()
+
+    logger.info("proxy_shutdown")
 
 if __name__ == "__main__":
     uvicorn.run(

@@ -4,3 +4,4 @@ httpx==0.26.0
 pydantic-settings==2.1.0
 structlog==24.1.0
 slowapi==0.1.9
+tenacity==8.2.3
