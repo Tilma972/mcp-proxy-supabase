@@ -98,6 +98,16 @@ async def list_entreprises_handler(params: Dict[str, Any]):
     })
 
 
+@register_tool(
+    name="get_stats_entreprises",
+    category=ToolCategory.READ,
+    description_short="Statistiques globales sur les entreprises et revenus"
+)
+async def get_stats_entreprises_handler(params: Dict[str, Any]):
+    """Get global statistics about companies and revenue"""
+    return await call_supabase_rpc("get_stats_entreprises", {})
+
+
 # ============================================================================
 # QUALIFICATION READ HANDLERS
 # ============================================================================
