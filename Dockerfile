@@ -9,8 +9,17 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application
+# Copy application files
 COPY main.py .
+COPY config.py .
+COPY auth.py .
+COPY middleware.py .
+COPY tools_registry.py .
+
+# Copy modules
+COPY handlers/ handlers/
+COPY schemas/ schemas/
+COPY utils/ utils/
 
 # Expose port
 EXPOSE 8000
