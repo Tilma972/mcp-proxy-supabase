@@ -72,6 +72,17 @@ LIST_ENTREPRISES_SCHEMA = ToolSchema(
     category="read"
 )
 
+GET_STATS_ENTREPRISES_SCHEMA = ToolSchema(
+    name="get_stats_entreprises",
+    description="Récupère les statistiques globales sur toutes les entreprises (nombre total, revenus totaux des encarts). Utile pour obtenir une vue d'ensemble du CRM.",
+    input_schema={
+        "type": "object",
+        "properties": {},
+        "required": []
+    },
+    category="read"
+)
+
 # ============================================================================
 # QUALIFICATION TOOLS
 # ============================================================================
@@ -246,6 +257,7 @@ READ_TOOL_SCHEMAS = {
     "search_entreprise_with_stats": SEARCH_ENTREPRISE_SCHEMA,
     "get_entreprise_by_id": GET_ENTREPRISE_BY_ID_SCHEMA,
     "list_entreprises": LIST_ENTREPRISES_SCHEMA,
+    "get_stats_entreprises": GET_STATS_ENTREPRISES_SCHEMA,
     "get_entreprise_qualifications": GET_ENTREPRISE_QUALIFICATIONS_SCHEMA,
     "search_qualifications": SEARCH_QUALIFICATIONS_SCHEMA,
     "search_factures": SEARCH_FACTURES_SCHEMA,
