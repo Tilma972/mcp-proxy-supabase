@@ -98,6 +98,121 @@ async def call_email_worker(endpoint: str, payload: dict) -> dict:
 
 
 # ============================================================================
+# FACTURE PDF WORKFLOW HANDLERS
+# ============================================================================
+
+@register_tool(
+    name="generate_facture_pdf",
+    category=ToolCategory.WORKFLOW,
+    description_short="Génère PDF facture et upload (sans email)"
+)
+async def generate_facture_pdf_handler(params: Dict[str, Any]):
+    """
+    Generate invoice PDF and upload to storage (no email)
+
+    Steps:
+    1. Fetch invoice data (Supabase RPC)
+    2. Check if PDF already exists (unless force_regenerate)
+    3. Generate PDF (document-worker)
+    4. Upload PDF (storage-worker or document-worker integrated upload)
+    5. Update invoice pdf_status and pdf_url (database-worker)
+
+    Returns:
+        {
+            "success": True,
+            "facture_id": "...",
+            "pdf_url": "https://...",
+            "pdf_status": "generated"
+        }
+    """
+    facture_id = params["facture_id"]
+    force_regenerate = params.get("force_regenerate", False)
+
+    logger.info("workflow_generate_facture_pdf_start", facture_id=facture_id, force=force_regenerate)
+
+    try:
+        # Step 1: Fetch invoice
+        logger.debug("workflow_step_1_fetch_facture", facture_id=facture_id)
+        facture_data = await call_supabase_rpc("get_facture_by_id", {"p_id": facture_id})
+
+        if not facture_data or len(facture_data) == 0:
+            raise HTTPException(status_code=404, detail=f"Facture {facture_id} not found")
+
+        facture = facture_data[0] if isinstance(facture_data, list) else facture_data
+
+        # Step 2: Check if PDF already exists
+        if not force_regenerate and facture.get("pdf_url") and facture.get("pdf_status") == "generated":
+            logger.info("workflow_pdf_already_exists", pdf_url=facture["pdf_url"])
+            return {
+                "success": True,
+                "facture_id": facture_id,
+                "pdf_url": facture["pdf_url"],
+                "pdf_status": "generated",
+                "message": "PDF already exists (use force_regenerate=true to regenerate)"
+            }
+
+        # Step 3: Generate PDF (document-worker with integrated upload)
+        logger.debug("workflow_step_3_generate_pdf", facture_id=facture_id)
+        
+        # Call document-worker with upload=true to get direct URL
+        pdf_result = await call_document_worker(
+            "/generate/facture",
+            {
+                "facture_id": facture_id,
+                "upload": True,  # Document worker uploads to Supabase directly
+                "bucket": "factures"
+            }
+        )
+
+        pdf_url = pdf_result.get("pdf_url") or pdf_result.get("public_url")
+
+        if not pdf_url:
+            raise HTTPException(
+                status_code=500,
+                detail="PDF generated but no URL returned from document-worker"
+            )
+
+        # Step 4: Update invoice status in DB
+        logger.debug("workflow_step_4_update_status", facture_id=facture_id, pdf_url=pdf_url)
+        await call_database_worker(
+            f"/facture/{facture_id}",
+            {
+                "pdf_status": "generated",
+                "pdf_url": pdf_url
+            },
+            method="PUT",
+            require_validation=False
+        )
+
+        logger.info(
+            "workflow_generate_facture_pdf_complete",
+            facture_id=facture_id,
+            pdf_url=pdf_url
+        )
+
+        return {
+            "success": True,
+            "facture_id": facture_id,
+            "pdf_url": pdf_url,
+            "pdf_status": "generated",
+            "numero_facture": facture.get("numero_facture")
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(
+            "workflow_generate_facture_pdf_failed",
+            facture_id=facture_id,
+            error=str(e)
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate facture PDF: {str(e)}"
+        )
+
+
+# ============================================================================
 # EMAIL WORKFLOW HANDLERS
 # ============================================================================
 

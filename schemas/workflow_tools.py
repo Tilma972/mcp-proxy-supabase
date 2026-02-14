@@ -36,6 +36,27 @@ SEND_FACTURE_EMAIL_SCHEMA = ToolSchema(
     category="workflow"
 )
 
+GENERATE_FACTURE_PDF_SCHEMA = ToolSchema(
+    name="generate_facture_pdf",
+    description="Génère le PDF d'une facture existante et l'upload sur Supabase Storage. Retourne l'URL du PDF. N'envoie PAS d'email.",
+    input_schema={
+        "type": "object",
+        "properties": {
+            "facture_id": {
+                "type": "string",
+                "description": "UUID de la facture (requis)"
+            },
+            "force_regenerate": {
+                "type": "boolean",
+                "description": "Forcer la régénération même si PDF existe déjà (défaut: false)",
+                "default": False
+            }
+        },
+        "required": ["facture_id"]
+    },
+    category="workflow"
+)
+
 CREATE_AND_SEND_FACTURE_SCHEMA = ToolSchema(
     name="create_and_send_facture",
     description="Workflow complet : Crée facture → Génère PDF → Upload → Envoie email. Simplifie création + envoi en une seule opération.",
@@ -110,6 +131,7 @@ GENERATE_MONTHLY_REPORT_SCHEMA = ToolSchema(
 # ============================================================================
 
 WORKFLOW_TOOL_SCHEMAS = {
+    "generate_facture_pdf": GENERATE_FACTURE_PDF_SCHEMA,
     "send_facture_email": SEND_FACTURE_EMAIL_SCHEMA,
     "create_and_send_facture": CREATE_AND_SEND_FACTURE_SCHEMA,
     "generate_monthly_report": GENERATE_MONTHLY_REPORT_SCHEMA,
