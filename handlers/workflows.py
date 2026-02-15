@@ -188,7 +188,12 @@ async def generate_facture_pdf_handler(params: Dict[str, Any]):
         )
 
         pdf_base64 = pdf_result.get("pdf_base64")
-        numero_facture = facture.get("numero_facture") or pdf_result.get("facture_numero") or str(facture_id)
+        # Use .strip() to handle empty strings ("" is truthy but useless)
+        numero_facture = (
+            (facture.get("numero_facture") or "").strip()
+            or pdf_result.get("facture_numero")
+            or str(facture_id)
+        )
         created_at = facture.get("created_at") or ""
         year = str(created_at)[:4] if created_at else str(datetime.utcnow().year)
 
@@ -200,6 +205,8 @@ async def generate_facture_pdf_handler(params: Dict[str, Any]):
 
         # Step 4: Upload PDF to storage-worker
         filename = f"{numero_facture}.pdf"
+        # Combine year folder + filename into a single path
+        storage_path = f"{year}/{filename}"
         upload_result = await call_storage_worker(
             "/upload/base64",
             {
@@ -207,7 +214,8 @@ async def generate_facture_pdf_handler(params: Dict[str, Any]):
                 "filename": filename,
                 "content": pdf_base64,
                 "content_type": "application/pdf",
-                "path": year,
+                "path": storage_path,
+                "upsert": "true",
                 "request_id": request_id_ctx.get() or str(uuid.uuid4())
             },
             use_form_data=True
