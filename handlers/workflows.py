@@ -8,6 +8,7 @@ Examples: Generate PDF + Upload + Send Email
 import asyncio
 from typing import Dict, Any, Optional
 from datetime import datetime
+import uuid
 from fastapi import HTTPException
 import structlog
 
@@ -52,7 +53,7 @@ async def call_document_worker(endpoint: str, payload: dict) -> dict:
 
 
 @retry_with_backoff(max_attempts=3, base_delay=1.0)
-async def call_storage_worker(endpoint: str, payload: dict) -> dict:
+async def call_storage_worker(endpoint: str, payload: dict, use_form_data: bool = False) -> dict:
     """Call the storage-worker service (file upload)"""
     if not settings.storage_worker_url:
         raise RuntimeError("STORAGE_WORKER_URL not configured")
@@ -61,14 +62,19 @@ async def call_storage_worker(endpoint: str, payload: dict) -> dict:
     url = f"{settings.storage_worker_url.rstrip('/')}{endpoint}"
 
     headers = {
-        "Content-Type": "application/json",
         "X-FlowChat-Worker-Auth": settings.worker_auth_key or "",
         "X-Request-ID": request_id_ctx.get()
     }
 
+    if not use_form_data:
+        headers["Content-Type"] = "application/json"
+
     logger.debug("storage_worker_call", endpoint=endpoint)
 
-    resp = await client.post(url, headers=headers, json=payload, timeout=30.0)
+    if use_form_data:
+        resp = await client.post(url, headers=headers, data=payload, timeout=30.0)
+    else:
+        resp = await client.post(url, headers=headers, json=payload, timeout=30.0)
     resp.raise_for_status()
 
     return resp.json()
@@ -151,38 +157,72 @@ async def generate_facture_pdf_handler(params: Dict[str, Any]):
                 "message": "PDF already exists (use force_regenerate=true to regenerate)"
             }
 
-        # Step 3: Determine template based on payment status
+        # Step 3: Determine payment flag for document-worker
         payment_status = facture.get("payment_status", "unpaid")
-        template = "facture_acquittee" if payment_status == "paid" else "facture_emise"
+        is_paid = payment_status == "paid"
+        qualification_id = facture.get("qualification_id")
+
+        if not qualification_id:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Facture {facture_id} has no qualification_id"
+            )
         
         logger.debug(
             "workflow_step_3_generate_pdf",
             facture_id=facture_id,
             payment_status=payment_status,
-            template=template
+            qualification_id=qualification_id,
+            is_paid=is_paid
         )
-        
-        # Call document-worker with upload=true to get direct URL
+
+        # Call document-worker with current API schema
         pdf_result = await call_document_worker(
             "/generate/facture",
             {
-                "facture_id": facture_id,
-                "template": template,  # facture_emise or facture_acquittee
-                "upload": True,  # Document worker uploads to Supabase directly
-                "bucket": "factures"
+                "request_id": request_id_ctx.get() or str(uuid.uuid4()),
+                "qualification_id": qualification_id,
+                "is_paid": is_paid,
+                "send_email": False
             }
         )
 
-        pdf_url = pdf_result.get("pdf_url") or pdf_result.get("public_url")
+        pdf_base64 = pdf_result.get("pdf_base64")
+        numero_facture = facture.get("numero_facture") or pdf_result.get("facture_numero") or str(facture_id)
+        created_at = facture.get("created_at") or ""
+        year = str(created_at)[:4] if created_at else str(datetime.utcnow().year)
+
+        if not pdf_base64:
+            raise HTTPException(
+                status_code=500,
+                detail="PDF generated but no pdf_base64 returned from document-worker"
+            )
+
+        # Step 4: Upload PDF to storage-worker
+        filename = f"{numero_facture}.pdf"
+        upload_result = await call_storage_worker(
+            "/upload/base64",
+            {
+                "bucket": "factures",
+                "filename": filename,
+                "content": pdf_base64,
+                "content_type": "application/pdf",
+                "path": year,
+                "request_id": request_id_ctx.get() or str(uuid.uuid4())
+            },
+            use_form_data=True
+        )
+
+        pdf_url = upload_result.get("public_url") or upload_result.get("url") or upload_result.get("signed_url")
 
         if not pdf_url:
             raise HTTPException(
                 status_code=500,
-                detail="PDF generated but no URL returned from document-worker"
+                detail="PDF uploaded but no URL returned from storage-worker"
             )
 
-        # Step 4: Update invoice status in DB
-        logger.debug("workflow_step_4_update_status", facture_id=facture_id, pdf_url=pdf_url)
+        # Step 5: Update invoice status in DB
+        logger.debug("workflow_step_5_update_status", facture_id=facture_id, pdf_url=pdf_url)
         await call_database_worker(
             f"/facture/{facture_id}",
             {
@@ -204,7 +244,7 @@ async def generate_facture_pdf_handler(params: Dict[str, Any]):
             "facture_id": facture_id,
             "pdf_url": pdf_url,
             "pdf_status": "generated",
-            "numero_facture": facture.get("numero_facture")
+            "numero_facture": numero_facture
         }
 
     except HTTPException:
