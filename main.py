@@ -22,14 +22,9 @@ from auth import verify_proxy_key, verify_flowchat_mcp_key
 from middleware import RequestIDMiddleware
 from utils.http_client import init_shared_client, close_shared_client
 from tools_registry import dispatch_tool, list_tools, get_tool_info
-from schemas.read_tools import READ_TOOL_SCHEMAS
-from schemas.write_tools import WRITE_TOOL_SCHEMAS
-from schemas.workflow_tools import WORKFLOW_TOOL_SCHEMAS
 
-# Import handlers to register tools
-import handlers.supabase_read
-import handlers.database_write
-import handlers.workflows
+# Import tools module to register all domain handlers and load schemas
+from tools import ALL_TOOL_SCHEMAS
 
 # ============================================================================
 # LOGGING
@@ -157,14 +152,7 @@ async def mcp_get_tool_schema(
     """
     logger.info("mcp_tool_schema_request", tool_name=tool_name, client_ip=request.client.host)
 
-    # Check all schema registries
-    all_schemas = {
-        **READ_TOOL_SCHEMAS,
-        **WRITE_TOOL_SCHEMAS,
-        **WORKFLOW_TOOL_SCHEMAS
-    }
-
-    schema = all_schemas.get(tool_name)
+    schema = ALL_TOOL_SCHEMAS.get(tool_name)
 
     if not schema:
         logger.warning("mcp_tool_schema_not_found", tool_name=tool_name)
