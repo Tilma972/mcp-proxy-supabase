@@ -24,6 +24,7 @@ def test_imports():
         import tools_registry
         import utils.http_client
         import utils.retry
+        import utils.validation
 
         # New modular tools architecture
         import tools
@@ -288,6 +289,115 @@ def test_domain_distribution():
         return False
 
 
+def test_tool_domains_registry():
+    """Test that TOOL_DOMAINS registry is consistent"""
+    print("\nTesting TOOL_DOMAINS registry...")
+
+    try:
+        from tools import TOOL_DOMAINS, ALL_TOOL_SCHEMAS
+
+        expected_domains = ["entreprises", "qualifications", "factures", "paiements", "communications"]
+
+        # Check all expected domains exist
+        missing = set(expected_domains) - set(TOOL_DOMAINS.keys())
+        if missing:
+            print(f"[FAIL] Missing domains: {missing}")
+            return False
+
+        # Check all tools in TOOL_DOMAINS are in ALL_TOOL_SCHEMAS
+        all_domain_tools = []
+        for domain_name, domain_info in TOOL_DOMAINS.items():
+            for tool_name in domain_info["tools"]:
+                all_domain_tools.append(tool_name)
+                if tool_name not in ALL_TOOL_SCHEMAS:
+                    print(f"[FAIL] Tool '{tool_name}' in domain '{domain_name}' not in ALL_TOOL_SCHEMAS")
+                    return False
+
+        # Check total matches
+        if len(all_domain_tools) != len(ALL_TOOL_SCHEMAS):
+            print(f"[FAIL] TOOL_DOMAINS has {len(all_domain_tools)} tools, ALL_TOOL_SCHEMAS has {len(ALL_TOOL_SCHEMAS)}")
+            return False
+
+        for domain_name, domain_info in TOOL_DOMAINS.items():
+            print(f"   {domain_name}: {len(domain_info['tools'])} tools - {domain_info['description']}")
+
+        print("[PASS] TOOL_DOMAINS registry is consistent")
+        return True
+
+    except Exception as e:
+        print(f"[FAIL] TOOL_DOMAINS test failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def test_param_validation():
+    """Test parameter validation utility"""
+    print("\nTesting parameter validation...")
+
+    try:
+        from utils.validation import validate_params
+
+        # Test 1: Valid params
+        schema = {
+            "type": "object",
+            "properties": {
+                "search_term": {"type": "string"},
+                "limit": {"type": "integer", "default": 10}
+            },
+            "required": ["search_term"]
+        }
+        errors = validate_params({"search_term": "ACME", "limit": 5}, schema)
+        if errors:
+            print(f"[FAIL] Valid params rejected: {errors}")
+            return False
+        print("   Valid params: OK")
+
+        # Test 2: Missing required field
+        errors = validate_params({"limit": 5}, schema)
+        if not errors:
+            print("[FAIL] Missing required field not detected")
+            return False
+        print(f"   Missing required: OK ({errors[0]})")
+
+        # Test 3: Wrong type
+        errors = validate_params({"search_term": 123}, schema)
+        if not errors:
+            print("[FAIL] Wrong type not detected")
+            return False
+        print(f"   Wrong type: OK ({errors[0]})")
+
+        # Test 4: Invalid enum
+        schema_with_enum = {
+            "type": "object",
+            "properties": {
+                "statut": {"type": "string", "enum": ["en_cours", "gagne", "perdu"]}
+            },
+            "required": ["statut"]
+        }
+        errors = validate_params({"statut": "invalid"}, schema_with_enum)
+        if not errors:
+            print("[FAIL] Invalid enum not detected")
+            return False
+        print(f"   Invalid enum: OK ({errors[0]})")
+
+        # Test 5: Valid enum
+        errors = validate_params({"statut": "gagne"}, schema_with_enum)
+        if errors:
+            print(f"[FAIL] Valid enum rejected: {errors}")
+            return False
+        print("   Valid enum: OK")
+
+        print("[PASS] Parameter validation works correctly")
+        return True
+
+    except Exception as e:
+        print(f"[FAIL] Validation test failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
 def main():
     """Run all tests"""
     print("=" * 60)
@@ -301,6 +411,8 @@ def main():
         test_tool_registry,
         test_handler_registration,
         test_domain_distribution,
+        test_tool_domains_registry,
+        test_param_validation,
     ]
 
     results = []

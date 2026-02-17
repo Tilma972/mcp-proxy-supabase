@@ -28,3 +28,32 @@ ALL_TOOL_SCHEMAS = {
     **PAIEMENT_SCHEMAS,
     **COMMUNICATION_SCHEMAS,
 }
+
+# Domain registry: maps domain name -> {description, tool_names, schemas}
+TOOL_DOMAINS = {
+    "entreprises": {
+        "description": "Gestion clients",
+        "tools": list(ENTREPRISE_SCHEMAS.keys()),
+        "schemas": ENTREPRISE_SCHEMAS,
+    },
+    "qualifications": {
+        "description": "Gestion commerciale",
+        "tools": list(QUALIFICATION_SCHEMAS.keys()),
+        "schemas": QUALIFICATION_SCHEMAS,
+    },
+    "factures": {
+        "description": "Facturation",
+        "tools": list(FACTURE_SCHEMAS.keys()),
+        "schemas": FACTURE_SCHEMAS,
+    },
+    "paiements": {
+        "description": "Tresorerie",
+        "tools": list(PAIEMENT_SCHEMAS.keys()),
+        "schemas": PAIEMENT_SCHEMAS,
+    },
+    "communications": {
+        "description": "Emails & notifications",
+        "tools": list(COMMUNICATION_SCHEMAS.keys()),
+        "schemas": COMMUNICATION_SCHEMAS,
+    },
+}

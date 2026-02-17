@@ -67,9 +67,10 @@ supabase-mcp-proxy/
 ├── utils/                     # Shared utilities
 │   ├── __init__.py
 │   ├── http_client.py        # Shared AsyncClient (connection pooling)
-│   └── retry.py              # Exponential backoff decorator
+│   ├── retry.py              # Exponential backoff decorator
+│   └── validation.py         # JSON Schema param validation (pre-dispatch)
 │
-├── test_implementation.py     # Verification tests (6 tests)
+├── test_implementation.py     # Verification tests (8 tests)
 ├── requirements.txt           # Dependencies
 ├── .env.example              # Configuration template
 ├── Dockerfile                # Container build
@@ -351,6 +352,33 @@ GET /health
 }
 ```
 
+### Worker Health Check
+
+```
+GET /health/workers
+```
+
+**Auth**: None
+**Response**:
+```json
+{
+  "workers": {
+    "database_worker": {"status": "healthy", "status_code": 200, "url": "http://..."},
+    "document_worker": {"status": "unreachable", "url": "http://...", "error": "..."},
+    "storage_worker": {"status": "not_configured", "url": null},
+    "email_worker": {"status": "healthy", "status_code": 200, "url": "http://..."}
+  },
+  "categories": {
+    "read": true,
+    "write": true,
+    "workflow": false
+  }
+}
+```
+
+**Worker statuses**: `healthy`, `unhealthy`, `unreachable`, `not_configured`
+**Category logic**: READ always true, WRITE needs database_worker, WORKFLOW needs all 4
+
 ### Supabase Proxy (existing - UNCHANGED)
 
 ```
@@ -364,6 +392,41 @@ GET/POST/PUT/DELETE /mcp/{path:path}
 - `/mcp/rest/v1/rpc/function_name` - REST API
 
 ### List Tools
+
+```
+GET /mcp/tools/list
+```
+
+**Auth**: `X-Proxy-Key: FLOWCHAT_MCP_KEY`
+**Response**: Flat list of all tools (see below)
+
+### List Tools by Domain
+
+```
+GET /mcp/tools/domains
+```
+
+**Auth**: `X-Proxy-Key: FLOWCHAT_MCP_KEY`
+**Response**:
+```json
+{
+  "domains": {
+    "entreprises": {
+      "description": "Gestion clients",
+      "tool_count": 5,
+      "tools": [
+        {"name": "search_entreprise_with_stats", "category": "read", "description": "..."},
+        {"name": "upsert_entreprise", "category": "write", "description": "..."}
+      ]
+    },
+    "factures": { "..." : "..." }
+  },
+  "total_domains": 5,
+  "total_tools": 21
+}
+```
+
+### List Tools (flat)
 
 ```
 GET /mcp/tools/list
@@ -436,7 +499,19 @@ POST /mcp/tools/call
 }
 ```
 
-**Error Response** (validation failure):
+**Error Response** (parameter validation - before dispatch):
+```json
+{
+  "detail": {
+    "message": "Parameter validation failed",
+    "errors": ["Missing required field: 'search_term'"],
+    "tool_name": "search_entreprise_with_stats"
+  }
+}
+```
+Status: 422
+
+**Error Response** (worker validation - after dispatch):
 ```json
 {
   "detail": "Validation failed: discrepancies..."
@@ -508,7 +583,7 @@ curl -X POST http://localhost:8000/mcp/tools/call \
 python test_implementation.py
 
 # Expected output:
-# Tests passed: 6/6
+# Tests passed: 8/8
 # [PASS] All tests passed! Modular architecture is ready.
 ```
 
@@ -696,4 +771,4 @@ The project is deployed on Coolify. See existing Dockerfile.
 For detailed implementation info, see:
 - `IMPLEMENTATION.md` - Full technical details
 - `COMPLETION_SUMMARY.md` - Status and metrics
-- `test_implementation.py` - Verification tests (6 tests, 21 tools)
+- `test_implementation.py` - Verification tests (8 tests, 21 tools)
