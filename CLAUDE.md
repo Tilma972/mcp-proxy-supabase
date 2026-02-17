@@ -4,9 +4,9 @@
 
 This is a **unified MCP (Model Context Protocol) proxy** that centralizes access to FlowChat CRM tools for the Claude API. It solves a critical token budget problem by reducing tool definitions from 51,000 tokens to ~2,000 tokens.
 
-**Purpose**: Enable a Telegram bot (FlowChat CRM for firefighters) to use Claude API effectively by exposing 19 tools through a single MCP server instead of defining them directly in each API call.
+**Purpose**: Enable a Telegram bot (FlowChat CRM for firefighters) to use Claude API effectively by exposing 21 tools through a single MCP server instead of defining them directly in each API call.
 
-**Status**: Implementation complete (Phases 1-5), ready for runtime testing with workers.
+**Status**: Modular architecture (Phase 6), ready for runtime testing with workers.
 
 ---
 
@@ -31,9 +31,9 @@ Supabase Database
    - Proxies SSE and REST requests to Supabase MCP
    - Authentication: `X-Proxy-Key`
 
-2. **FlowChat MCP Tools** (new functionality)
+2. **FlowChat MCP Tools** (modular domain architecture)
    - Routes: `/mcp/tools/list`, `/mcp/tools/{name}/schema`, `/mcp/tools/call`
-   - Exposes 19 tools (10 READ, 6 WRITE, 3 WORKFLOW)
+   - Exposes 21 tools (11 READ, 6 WRITE, 4 WORKFLOW) across 5 domains
    - Authentication: `FLOWCHAT_MCP_KEY`
 
 3. **Worker Integration**
@@ -54,24 +54,23 @@ supabase-mcp-proxy/
 ├── middleware.py              # RequestIDMiddleware (ContextVar tracking)
 ├── tools_registry.py          # Tool registration & dispatch system
 │
-├── schemas/                   # Tool schemas (MCP format)
-│   ├── __init__.py           # ToolSchema base class
-│   ├── read_tools.py         # 10 READ tool schemas (Supabase RPC)
-│   ├── write_tools.py        # 6 WRITE tool schemas (database-worker)
-│   └── workflow_tools.py     # 3 WORKFLOW tool schemas (multi-worker)
-│
-├── handlers/                  # Tool handlers (async functions)
-│   ├── __init__.py
-│   ├── supabase_read.py      # 10 READ handlers (call_supabase_rpc)
-│   ├── database_write.py     # 6 WRITE handlers (call_database_worker)
-│   └── workflows.py          # 3 WORKFLOW handlers (orchestration)
+├── tools/                     # Modular domain-based tools (schemas + handlers)
+│   ├── __init__.py           # Registration hub, ALL_TOOL_SCHEMAS export
+│   ├── base.py               # ToolSchema class + worker call helpers
+│   ├── entreprises.py        # Gestion clients (5 tools)
+│   ├── qualifications.py     # Gestion commerciale (3 tools)
+│   ├── factures.py           # Facturation (7 tools)
+│   ├── paiements.py          # Tresorerie (3 tools)
+│   ├── communications.py     # Emails & notifications (3 tools)
+│   └── analytics.py          # Reporting (placeholder futur)
 │
 ├── utils/                     # Shared utilities
 │   ├── __init__.py
 │   ├── http_client.py        # Shared AsyncClient (connection pooling)
-│   └── retry.py              # Exponential backoff decorator
+│   ├── retry.py              # Exponential backoff decorator
+│   └── validation.py         # JSON Schema param validation (pre-dispatch)
 │
-├── test_implementation.py     # Verification tests
+├── test_implementation.py     # Verification tests (8 tests)
 ├── requirements.txt           # Dependencies
 ├── .env.example              # Configuration template
 ├── Dockerfile                # Container build
@@ -84,29 +83,46 @@ supabase-mcp-proxy/
 
 ## Key Concepts
 
-### 1. Tool Registration Pattern
+### 1. Tool Registration Pattern (Modular)
 
-Tools are registered using a decorator pattern:
+Each domain file contains both schemas AND handlers:
 
 ```python
-from tools_registry import register_tool, ToolCategory
+# tools/entreprises.py
+from tools.base import ToolSchema, register_tool, ToolCategory, call_supabase_rpc
 
+# Schema
+SEARCH_ENTREPRISE_SCHEMA = ToolSchema(
+    name="search_entreprise_with_stats",
+    description="Recherche entreprise par nom avec statistiques...",
+    input_schema={...},
+    category="read"
+)
+
+# Handler
 @register_tool(
     name="search_entreprise_with_stats",
     category=ToolCategory.READ,
-    description_short="Recherche entreprise par nom avec stats"
+    description_short="Recherche entreprise par nom avec statistiques"
 )
 async def search_entreprise_with_stats_handler(params: Dict[str, Any]):
     return await call_supabase_rpc("search_entreprise_with_stats", {
         "p_search_term": params["search_term"],
         "p_limit": params.get("limit", 10)
     })
+
+# Domain schema registry
+ENTREPRISE_SCHEMAS = {
+    "search_entreprise_with_stats": SEARCH_ENTREPRISE_SCHEMA,
+    ...
+}
 ```
 
 **How it works**:
-- Decorator adds handler to `TOOL_REGISTRY` dict
-- `/mcp/tools/call` uses `dispatch_tool()` to route to handler
-- Schema is stored separately in `schemas/` folder
+- Each domain file groups schemas + handlers for a business domain
+- `tools/__init__.py` imports all domains, triggering `@register_tool` decorators
+- `ALL_TOOL_SCHEMAS` aggregates all domain schemas for the MCP protocol
+- `dispatch_tool()` routes tool calls via the global `TOOL_REGISTRY`
 
 ### 2. Request ID Propagation
 
@@ -178,21 +194,66 @@ async def some_handler():
 
 ---
 
-## Tool Categories
+## Tool Domains (21 tools)
 
-### READ Tools (10)
+### entreprises.py - Gestion clients (5 tools)
 
-**Purpose**: Fetch data from Supabase via RPC functions
-**Authentication**: Supabase API key
-**Worker dependency**: None (Supabase only)
-**Latency**: 50-200ms
+| Tool | Type | Description |
+|------|------|-------------|
+| `search_entreprise_with_stats` | READ | Recherche entreprise par nom avec stats |
+| `get_entreprise_by_id` | READ | Details complets d'une entreprise |
+| `list_entreprises` | READ | Liste entreprises avec pagination |
+| `get_stats_entreprises` | READ | Statistiques globales CRM |
+| `upsert_entreprise` | WRITE | Cree ou met a jour une entreprise |
 
-**Examples**:
-- `search_entreprise_with_stats` - Search companies with revenue stats
-- `get_facture_by_id` - Get invoice details
-- `list_recent_interactions` - Get recent Telegram messages
+### qualifications.py - Gestion commerciale (3 tools)
 
-**Pattern**:
+| Tool | Type | Description |
+|------|------|-------------|
+| `get_entreprise_qualifications` | READ | Qualifications d'une entreprise |
+| `search_qualifications` | READ | Recherche par statut/periode |
+| `upsert_qualification` | WRITE | Cree ou met a jour une qualification |
+
+### factures.py - Facturation (7 tools)
+
+| Tool | Type | Description |
+|------|------|-------------|
+| `search_factures` | READ | Recherche factures par criteres |
+| `get_facture_by_id` | READ | Details complets d'une facture |
+| `create_facture` | WRITE | Cree une nouvelle facture |
+| `update_facture` | WRITE | Met a jour une facture |
+| `delete_facture` | WRITE | Soft delete d'une facture |
+| `generate_facture_pdf` | WORKFLOW | Genere PDF et upload (sans email) |
+| `create_and_send_facture` | WORKFLOW | Cree + genere PDF + envoie email |
+
+### paiements.py - Tresorerie (3 tools)
+
+| Tool | Type | Description |
+|------|------|-------------|
+| `get_unpaid_factures` | READ | Factures impayees |
+| `get_revenue_stats` | READ | Statistiques revenus par periode |
+| `mark_facture_paid` | WRITE | Marque facture comme payee |
+
+### communications.py - Emails & notifications (3 tools)
+
+| Tool | Type | Description |
+|------|------|-------------|
+| `list_recent_interactions` | READ | Interactions recentes (Telegram) |
+| `send_facture_email` | WORKFLOW | Genere PDF + upload + envoie email |
+| `generate_monthly_report` | WORKFLOW | Rapport mensuel PDF avec stats |
+
+### analytics.py - Reporting (placeholder futur)
+
+Prevu : `dashboard_stats`, `export_campaign_report`, `forecast_revenue`
+
+---
+
+## Tool Types
+
+### READ (11 tools)
+
+**Pattern**: `call_supabase_rpc()` | **Latency**: 50-200ms | **Worker**: None (Supabase only)
+
 ```python
 async def handler(params):
     return await call_supabase_rpc("rpc_function_name", {
@@ -200,19 +261,10 @@ async def handler(params):
     })
 ```
 
-### WRITE Tools (6)
+### WRITE (6 tools)
 
-**Purpose**: Modify data via database-worker
-**Authentication**: Worker auth key + validation
-**Worker dependency**: database-worker
-**Latency**: 100-500ms
+**Pattern**: `call_database_worker()` | **Latency**: 100-500ms | **Worker**: database-worker
 
-**Examples**:
-- `upsert_entreprise` - Create/update company
-- `create_facture` - Create invoice
-- `mark_facture_paid` - Update payment status
-
-**Pattern**:
 ```python
 async def handler(params):
     return await call_database_worker(
@@ -222,36 +274,17 @@ async def handler(params):
     )
 ```
 
-### WORKFLOW Tools (3)
+### WORKFLOW (4 tools)
 
-**Purpose**: Orchestrate multiple workers for complex operations
-**Authentication**: Worker auth key
-**Worker dependency**: All 4 workers
-**Latency**: 1-5s
+**Pattern**: Multi-worker orchestration | **Latency**: 1-5s | **Workers**: All 4
 
-**Examples**:
-- `send_facture_email` - Generate PDF → Upload → Email → Update status
-- `create_and_send_facture` - Create + send in one operation
-- `generate_monthly_report` - Fetch stats → Generate PDF → Upload
-
-**Pattern**:
 ```python
 async def workflow_handler(params):
-    # Step 1: Fetch data
     facture = await call_supabase_rpc("get_facture_by_id", ...)
-
-    # Step 2: Generate PDF
     pdf = await call_document_worker("/generate/facture", ...)
-
-    # Step 3: Upload
     upload = await call_storage_worker("/upload", ...)
-
-    # Step 4: Send email
     email = await call_email_worker("/send", ...)
-
-    # Step 5: Update status
     await call_database_worker("/facture/update", ...)
-
     return {"success": True, "pdf_url": upload["public_url"]}
 ```
 
@@ -319,6 +352,33 @@ GET /health
 }
 ```
 
+### Worker Health Check
+
+```
+GET /health/workers
+```
+
+**Auth**: None
+**Response**:
+```json
+{
+  "workers": {
+    "database_worker": {"status": "healthy", "status_code": 200, "url": "http://..."},
+    "document_worker": {"status": "unreachable", "url": "http://...", "error": "..."},
+    "storage_worker": {"status": "not_configured", "url": null},
+    "email_worker": {"status": "healthy", "status_code": 200, "url": "http://..."}
+  },
+  "categories": {
+    "read": true,
+    "write": true,
+    "workflow": false
+  }
+}
+```
+
+**Worker statuses**: `healthy`, `unhealthy`, `unreachable`, `not_configured`
+**Category logic**: READ always true, WRITE needs database_worker, WORKFLOW needs all 4
+
 ### Supabase Proxy (existing - UNCHANGED)
 
 ```
@@ -338,6 +398,41 @@ GET /mcp/tools/list
 ```
 
 **Auth**: `X-Proxy-Key: FLOWCHAT_MCP_KEY`
+**Response**: Flat list of all tools (see below)
+
+### List Tools by Domain
+
+```
+GET /mcp/tools/domains
+```
+
+**Auth**: `X-Proxy-Key: FLOWCHAT_MCP_KEY`
+**Response**:
+```json
+{
+  "domains": {
+    "entreprises": {
+      "description": "Gestion clients",
+      "tool_count": 5,
+      "tools": [
+        {"name": "search_entreprise_with_stats", "category": "read", "description": "..."},
+        {"name": "upsert_entreprise", "category": "write", "description": "..."}
+      ]
+    },
+    "factures": { "..." : "..." }
+  },
+  "total_domains": 5,
+  "total_tools": 21
+}
+```
+
+### List Tools (flat)
+
+```
+GET /mcp/tools/list
+```
+
+**Auth**: `X-Proxy-Key: FLOWCHAT_MCP_KEY`
 **Response**:
 ```json
 {
@@ -348,7 +443,7 @@ GET /mcp/tools/list
       "description": "Recherche entreprise par nom avec stats"
     }
   ],
-  "total": 19
+  "total": 21
 }
 ```
 
@@ -404,7 +499,19 @@ POST /mcp/tools/call
 }
 ```
 
-**Error Response** (validation failure):
+**Error Response** (parameter validation - before dispatch):
+```json
+{
+  "detail": {
+    "message": "Parameter validation failed",
+    "errors": ["Missing required field: 'search_term'"],
+    "tool_name": "search_entreprise_with_stats"
+  }
+}
+```
+Status: 422
+
+**Error Response** (worker validation - after dispatch):
 ```json
 {
   "detail": "Validation failed: discrepancies..."
@@ -416,50 +523,46 @@ Status: 422
 
 ## Development Guidelines
 
-### Adding a New READ Tool
+### Adding a New Tool
 
-1. **Define schema** in `schemas/read_tools.py`:
+1. **Choose the domain file** (`tools/entreprises.py`, `tools/factures.py`, etc.)
+   - Or create a new domain file if needed
+
+2. **Add schema + handler** in the same file:
 ```python
+# In tools/entreprises.py (or appropriate domain file)
+from tools.base import ToolSchema, register_tool, ToolCategory, call_supabase_rpc
+
+# 1. Define schema
 NEW_TOOL_SCHEMA = ToolSchema(
     name="new_tool",
     description="...",
     input_schema={...},
-    category="read"
+    category="read"  # or "write", "workflow"
 )
 
-READ_TOOL_SCHEMAS["new_tool"] = NEW_TOOL_SCHEMA
-```
-
-2. **Create handler** in `handlers/supabase_read.py`:
-```python
+# 2. Create handler
 @register_tool(name="new_tool", category=ToolCategory.READ, description_short="...")
 async def new_tool_handler(params: Dict[str, Any]):
     return await call_supabase_rpc("rpc_function_name", {
         "p_param": params["param"]
     })
+
+# 3. Add to domain schema registry
+ENTREPRISE_SCHEMAS["new_tool"] = NEW_TOOL_SCHEMA
 ```
 
-3. **Test**:
+3. **For WRITE tools**: Use `call_database_worker()` with `require_validation=True`
+4. **For WORKFLOW tools**: Orchestrate multiple workers, handle errors gracefully
+5. **If new domain file**: Import it in `tools/__init__.py`
+
+6. **Test**:
 ```bash
+python test_implementation.py  # Verify registration
 curl -X POST http://localhost:8000/mcp/tools/call \
   -H "X-Proxy-Key: $KEY" \
   -d '{"tool_name": "new_tool", "params": {...}}'
 ```
-
-### Adding a New WRITE Tool
-
-Same as READ, but:
-- Schema in `schemas/write_tools.py`
-- Handler in `handlers/database_write.py`
-- **MUST** use `call_database_worker()` with `require_validation=True`
-
-### Adding a New WORKFLOW Tool
-
-Same as READ, but:
-- Schema in `schemas/workflow_tools.py`
-- Handler in `handlers/workflows.py`
-- Orchestrate multiple workers
-- Handle errors gracefully (no automatic rollback)
 
 ### Code Style
 
@@ -476,12 +579,12 @@ Same as READ, but:
 ### Unit Testing (manual)
 
 ```bash
-# Verify all modules compile
+# Verify all modules compile and tools are correctly distributed
 python test_implementation.py
 
 # Expected output:
-# Tests passed: 5/5
-# [PASS] All tests passed!
+# Tests passed: 8/8
+# [PASS] All tests passed! Modular architecture is ready.
 ```
 
 ### Integration Testing (requires workers)
@@ -662,10 +765,10 @@ The project is deployed on Coolify. See existing Dockerfile.
 ## Contact & Support
 
 **Project**: FlowChat MCP Unified Proxy
-**Status**: ✅ Implementation complete (Phases 1-5)
+**Status**: Modular architecture complete (Phase 6)
 **Next**: Runtime testing with workers
 
 For detailed implementation info, see:
 - `IMPLEMENTATION.md` - Full technical details
 - `COMPLETION_SUMMARY.md` - Status and metrics
-- `test_implementation.py` - Verification tests
+- `test_implementation.py` - Verification tests (8 tests, 21 tools)

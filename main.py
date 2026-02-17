@@ -22,14 +22,10 @@ from auth import verify_proxy_key, verify_flowchat_mcp_key
 from middleware import RequestIDMiddleware
 from utils.http_client import init_shared_client, close_shared_client
 from tools_registry import dispatch_tool, list_tools, get_tool_info
-from schemas.read_tools import READ_TOOL_SCHEMAS
-from schemas.write_tools import WRITE_TOOL_SCHEMAS
-from schemas.workflow_tools import WORKFLOW_TOOL_SCHEMAS
+from utils.validation import validate_params
 
-# Import handlers to register tools
-import handlers.supabase_read
-import handlers.database_write
-import handlers.workflows
+# Import tools module to register all domain handlers and load schemas
+from tools import ALL_TOOL_SCHEMAS, TOOL_DOMAINS
 
 # ============================================================================
 # LOGGING
@@ -111,6 +107,83 @@ async def health():
     }
 
 
+@app.get("/health/workers")
+async def health_workers():
+    """
+    Check worker availability and which tool categories are operational.
+
+    Tests connectivity to each worker URL with a short timeout.
+    No auth required (same as /health).
+    """
+    from utils.http_client import get_shared_client
+
+    worker_configs = {
+        "database_worker": {
+            "url": settings.database_worker_url,
+            "required_for": ["write"],
+        },
+        "document_worker": {
+            "url": settings.document_worker_url,
+            "required_for": ["workflow"],
+        },
+        "storage_worker": {
+            "url": settings.storage_worker_url,
+            "required_for": ["workflow"],
+        },
+        "email_worker": {
+            "url": settings.email_worker_url,
+            "required_for": ["workflow"],
+        },
+    }
+
+    results = {}
+    try:
+        client = await get_shared_client()
+    except RuntimeError:
+        # Client not initialized yet
+        for name in worker_configs:
+            results[name] = {"status": "unknown", "error": "HTTP client not initialized"}
+        return {
+            "workers": results,
+            "categories": {"read": True, "write": False, "workflow": False},
+        }
+
+    for name, config in worker_configs.items():
+        if not config["url"]:
+            results[name] = {"status": "not_configured", "url": None}
+            continue
+
+        health_url = f"{config['url'].rstrip('/')}/health"
+        try:
+            resp = await client.get(health_url, timeout=5.0)
+            results[name] = {
+                "status": "healthy" if resp.status_code == 200 else "unhealthy",
+                "status_code": resp.status_code,
+                "url": config["url"],
+            }
+        except Exception as e:
+            results[name] = {
+                "status": "unreachable",
+                "url": config["url"],
+                "error": str(e),
+            }
+
+    # Determine which categories are operational
+    categories = {
+        "read": True,  # READ tools only need Supabase (always available)
+        "write": results.get("database_worker", {}).get("status") == "healthy",
+        "workflow": all(
+            results.get(w, {}).get("status") == "healthy"
+            for w in ["document_worker", "storage_worker", "email_worker"]
+        ) and results.get("database_worker", {}).get("status") == "healthy",
+    }
+
+    return {
+        "workers": results,
+        "categories": categories,
+    }
+
+
 # ============================================================================
 # FLOWCHAT MCP TOOL ROUTES
 # ============================================================================
@@ -139,6 +212,46 @@ async def mcp_list_tools(
     }
 
 
+@app.get("/mcp/tools/domains")
+@limiter.limit(settings.rate_limit)
+async def mcp_list_domains(
+    request: Request,
+    authenticated: bool = Depends(verify_flowchat_mcp_key)
+):
+    """
+    List tools organized by business domain
+
+    Returns:
+        Domain map with description, tool count, and tool names per domain
+    """
+    logger.info("mcp_tools_domains_request", client_ip=request.client.host)
+
+    domains = {}
+    for domain_name, domain_info in TOOL_DOMAINS.items():
+        tool_names = domain_info["tools"]
+        # Enrich with category from registry
+        tools_with_category = []
+        for tool_name in tool_names:
+            tool_meta = get_tool_info(tool_name)
+            tools_with_category.append({
+                "name": tool_name,
+                "category": tool_meta["category"] if tool_meta else "unknown",
+                "description": tool_meta["description"] if tool_meta else "",
+            })
+
+        domains[domain_name] = {
+            "description": domain_info["description"],
+            "tool_count": len(tool_names),
+            "tools": tools_with_category,
+        }
+
+    return {
+        "domains": domains,
+        "total_domains": len(domains),
+        "total_tools": sum(d["tool_count"] for d in domains.values()),
+    }
+
+
 @app.get("/mcp/tools/{tool_name}/schema")
 @limiter.limit(settings.rate_limit)
 async def mcp_get_tool_schema(
@@ -157,14 +270,7 @@ async def mcp_get_tool_schema(
     """
     logger.info("mcp_tool_schema_request", tool_name=tool_name, client_ip=request.client.host)
 
-    # Check all schema registries
-    all_schemas = {
-        **READ_TOOL_SCHEMAS,
-        **WRITE_TOOL_SCHEMAS,
-        **WORKFLOW_TOOL_SCHEMAS
-    }
-
-    schema = all_schemas.get(tool_name)
+    schema = ALL_TOOL_SCHEMAS.get(tool_name)
 
     if not schema:
         logger.warning("mcp_tool_schema_not_found", tool_name=tool_name)
@@ -206,6 +312,25 @@ async def mcp_call_tool(
 
     if not tool_name:
         raise HTTPException(status_code=400, detail="Missing 'tool_name' in request body")
+
+    # Validate params against tool schema before dispatch
+    schema = ALL_TOOL_SCHEMAS.get(tool_name)
+    if schema:
+        validation_errors = validate_params(params, schema.input_schema)
+        if validation_errors:
+            logger.warning(
+                "mcp_tool_call_validation_failed",
+                tool_name=tool_name,
+                errors=validation_errors,
+            )
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "message": "Parameter validation failed",
+                    "errors": validation_errors,
+                    "tool_name": tool_name,
+                }
+            )
 
     try:
         result = await dispatch_tool(tool_name, params)
