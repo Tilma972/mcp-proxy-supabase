@@ -16,9 +16,8 @@ COPY auth.py .
 COPY middleware.py .
 COPY tools_registry.py .
 
-# Copy modules
-COPY handlers/ handlers/
-COPY schemas/ schemas/
+# Copy modules (new modular architecture)
+COPY tools/ tools/
 COPY utils/ utils/
 
 # Expose port
