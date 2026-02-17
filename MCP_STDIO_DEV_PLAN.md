@@ -310,7 +310,7 @@ Claude Desktop → mcp_dev_server.py (STDIO) →
 ## 🎯 Résultat final
 
 **Claude Desktop pourra** :
-- ✅ Accéder à tous les 19 tools
+- ✅ Accéder à tous les 21 tools
 - ✅ Lancer des tests E2E orchestrés
 - ✅ Voir le code complet du projet
 - ✅ Communiquer via MCP STDIO natif

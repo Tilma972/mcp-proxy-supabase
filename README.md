@@ -15,7 +15,7 @@ This proxy server exposes **19 FlowChat CRM tools** through the Model Context Pr
 
 ## Features
 
-- ✅ **19 Tools**: 10 READ, 6 WRITE, 3 WORKFLOW
+- ✅ **21 Tools**: 11 READ, 6 WRITE, 4 WORKFLOW
 - ✅ **Dual Authentication**: Separate keys for Supabase proxy vs FlowChat tools
 - ✅ **Request Tracking**: Unique ID per request with full tracing
 - ✅ **Validation Enforcement**: Automatic data validation for WRITE operations
@@ -66,7 +66,7 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
 # Health check
 curl http://localhost:8000/health
 
-# List tools (19 tools)
+# List tools (21 tools)
 curl -H "X-Proxy-Key: YOUR_FLOWCHAT_MCP_KEY" \
   http://localhost:8000/mcp/tools/list
 ```

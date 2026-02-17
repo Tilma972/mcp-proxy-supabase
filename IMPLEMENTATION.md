@@ -37,7 +37,7 @@ This document tracks the implementation of the FlowChat MCP Unified Proxy, which
 - Connection pooling (max 100 connections, 20 keepalive)
 - Lifecycle hooks (startup/shutdown)
 - 30s timeout with 10s connect timeout
-- Optimized for 19 tools × 4 workers = high request volume
+- Optimized for 21 tools × 4 workers = high request volume
 
 **Files Modified**:
 - `main.py` - Added startup/shutdown hooks for client lifecycle
@@ -231,7 +231,7 @@ WORKER_AUTH_KEY=your_worker_auth_key
 
 - [ ] Start server with updated code
 - [ ] Verify /health endpoint
-- [ ] Test /mcp/tools/list (should return 19 tools)
+- [ ] Test /mcp/tools/list (should return 21 tools)
 - [ ] Test /mcp/tools/{name}/schema for each category
 - [ ] Test /mcp/tools/call with READ tool
 - [ ] Test /mcp/tools/call with WRITE tool (requires workers)

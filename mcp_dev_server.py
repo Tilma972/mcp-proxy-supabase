@@ -51,6 +51,7 @@ import tools.qualifications  # noqa: F401
 import tools.factures  # noqa: F401
 import tools.paiements  # noqa: F401
 import tools.communications  # noqa: F401
+import tools.workflows  # noqa: F401 - Cross-domain orchestration
 import tools.analytics  # noqa: F401
 
 logger = structlog.get_logger()

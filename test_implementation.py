@@ -34,6 +34,7 @@ def test_imports():
         import tools.factures
         import tools.paiements
         import tools.communications
+        import tools.workflows
         import tools.analytics
 
         print("[PASS] All modules import successfully")
@@ -95,13 +96,15 @@ def test_schemas():
         from tools.factures import FACTURE_SCHEMAS
         from tools.paiements import PAIEMENT_SCHEMAS
         from tools.communications import COMMUNICATION_SCHEMAS
+        from tools.workflows import WORKFLOW_SCHEMAS
         from tools import ALL_TOOL_SCHEMAS
 
         print(f"   Entreprises schemas: {len(ENTREPRISE_SCHEMAS)}/5")
         print(f"   Qualifications schemas: {len(QUALIFICATION_SCHEMAS)}/3")
-        print(f"   Factures schemas: {len(FACTURE_SCHEMAS)}/7")
+        print(f"   Factures schemas: {len(FACTURE_SCHEMAS)}/5")  # 7→5 (workflows moved)
         print(f"   Paiements schemas: {len(PAIEMENT_SCHEMAS)}/3")
-        print(f"   Communications schemas: {len(COMMUNICATION_SCHEMAS)}/3")
+        print(f"   Communications schemas: {len(COMMUNICATION_SCHEMAS)}/1")  # 3→1 (workflows moved)
+        print(f"   Workflows schemas: {len(WORKFLOW_SCHEMAS)}/4")  # NEW domain
         print(f"   TOTAL (ALL_TOOL_SCHEMAS): {len(ALL_TOOL_SCHEMAS)}/21")
 
         if len(ALL_TOOL_SCHEMAS) == 21:
@@ -205,6 +208,7 @@ def test_domain_distribution():
         from tools.factures import FACTURE_SCHEMAS
         from tools.paiements import PAIEMENT_SCHEMAS
         from tools.communications import COMMUNICATION_SCHEMAS
+        from tools.workflows import WORKFLOW_SCHEMAS
 
         expected = {
             "entreprises": {
@@ -233,8 +237,6 @@ def test_domain_distribution():
                     "create_facture",
                     "update_facture",
                     "delete_facture",
-                    "generate_facture_pdf",
-                    "create_and_send_facture",
                 ]
             },
             "paiements": {
@@ -249,6 +251,13 @@ def test_domain_distribution():
                 "schemas": COMMUNICATION_SCHEMAS,
                 "expected_tools": [
                     "list_recent_interactions",
+                ]
+            },
+            "workflows": {
+                "schemas": WORKFLOW_SCHEMAS,
+                "expected_tools": [
+                    "generate_facture_pdf",
+                    "create_and_send_facture",
                     "send_facture_email",
                     "generate_monthly_report",
                 ]

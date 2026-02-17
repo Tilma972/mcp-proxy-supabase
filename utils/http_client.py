@@ -22,7 +22,7 @@ async def init_shared_client():
     Benefits:
     - Connection pooling: Reuses TCP connections across requests
     - Reduced latency: No handshake overhead for repeated calls
-    - Optimized for 19 tools calling 4 workers (many HTTP requests)
+    - Optimized for 21 tools calling 4 workers (many HTTP requests)
     """
     global _shared_client
 
