@@ -355,23 +355,34 @@ async def mcp_call_tool(
         }
 
     except ValueError as e:
+        # Tool not found in registry
         logger.error("mcp_tool_call_not_found", tool_name=tool_name, error=str(e))
         raise HTTPException(status_code=404, detail=str(e))
 
     except HTTPException:
-        # Re-raise HTTPExceptions from handlers (e.g., validation errors)
+        # Re-raise all HTTPExceptions from dispatch_tool:
+        # - 503 (worker unavailable / connection error)
+        # - 504 (worker timeout)
+        # - 422 (validation failed)
+        # - 404 (resource not found)
+        # - Worker HTTP errors (4xx/5xx with structured detail)
         raise
 
     except Exception as e:
+        # Safety net for truly unexpected errors not caught by dispatch_tool
         logger.error(
-            "mcp_tool_call_error",
+            "mcp_tool_call_unexpected_error",
             tool_name=tool_name,
             error=str(e),
             error_type=type(e).__name__
         )
         raise HTTPException(
             status_code=500,
-            detail=f"Tool execution failed: {str(e)}"
+            detail={
+                "error": "internal_error",
+                "message": "Une erreur inattendue s'est produite. Veuillez réessayer ou contacter le support si le problème persiste.",
+                "tool": tool_name,
+            }
         )
 
 @app.api_route("/mcp/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
