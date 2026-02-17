@@ -31,6 +31,17 @@ class Settings(BaseSettings):
     # Worker Auth
     worker_auth_key: Optional[str] = None  # X-FlowChat-Worker-Auth header
 
+    # Telegram Bot (HITL - Human In The Loop)
+    telegram_token: Optional[str] = None  # Bot token from @BotFather
+    telegram_webhook_secret: Optional[str] = None  # Secret for webhook verification
+    telegram_admin_id: Optional[str] = None  # Admin user ID for notifications
+    telegram_webhook_url: Optional[str] = None  # Full webhook URL (e.g., https://supabase.dsolution-ia.fr/webhook/telegram)
+
+    # HITL Configuration
+    hitl_enabled: bool = False  # Enable HITL validation system
+    hitl_timeout_minutes: int = 30  # Request timeout in minutes
+    hitl_facture_threshold: float = 1500.0  # Facture amount requiring validation (EUR)
+
     # App
     environment: str = "production"
     log_level: str = "INFO"

@@ -532,6 +532,136 @@ async def proxy_mcp(
         )
 
 # ============================================================================
+# HITL (Human In The Loop) WEBHOOK
+# ============================================================================
+
+@app.post("/webhook/telegram")
+async def telegram_webhook(
+    request: Request,
+    x_telegram_bot_api_secret_token: Optional[str] = None
+):
+    """
+    Telegram webhook endpoint for HITL validation responses
+
+    Receives callback queries from Telegram inline buttons:
+    - /approve - Approve pending request
+    - /reject - Reject pending request
+    - /modify - Modify parameters (requires follow-up message)
+
+    Security: Verifies secret token set during webhook configuration
+
+    Returns:
+        Success/error status for Telegram webhook
+    """
+    from utils.hitl import process_validation_response
+    from telegram import Update, Bot
+    import json
+
+    # Verify webhook secret token
+    if not settings.telegram_webhook_secret:
+        logger.warning("telegram_webhook_no_secret_configured")
+        # Continue processing even without secret for development
+    elif x_telegram_bot_api_secret_token != settings.telegram_webhook_secret:
+        logger.warning(
+            "telegram_webhook_invalid_secret",
+            provided=x_telegram_bot_api_secret_token[:10] + "..." if x_telegram_bot_api_secret_token else None
+        )
+        raise HTTPException(status_code=403, detail="Invalid webhook secret")
+
+    try:
+        # Parse Telegram update
+        body = await request.json()
+        update = Update.de_json(body, Bot(settings.telegram_token))
+
+        # Handle callback query (inline button click)
+        if update.callback_query:
+            callback_data = update.callback_query.data
+            user_id = str(update.callback_query.from_user.id)
+            username = update.callback_query.from_user.username or "unknown"
+
+            logger.info(
+                "telegram_webhook_callback",
+                callback_data=callback_data,
+                user_id=user_id,
+                username=username
+            )
+
+            # Parse callback data: "hitl_action:request_id"
+            if callback_data.startswith("hitl_"):
+                parts = callback_data.split(":", 1)
+                if len(parts) != 2:
+                    await update.callback_query.answer("Invalid callback data")
+                    return {"ok": True}
+
+                action_full = parts[0]  # "hitl_approve", "hitl_reject", "hitl_modify"
+                request_id = parts[1]
+                action = action_full.replace("hitl_", "")  # "approve", "reject", "modify"
+
+                # Handle modify action (requires follow-up input)
+                if action == "modify":
+                    await update.callback_query.answer(
+                        "⚠️ Modification manuelle non implémentée. Utilisez Approuver ou Rejeter.",
+                        show_alert=True
+                    )
+                    return {"ok": True}
+
+                # Process validation
+                try:
+                    result = await process_validation_response(
+                        request_id=request_id,
+                        action=action,
+                        validator_id=f"{user_id}@{username}"
+                    )
+
+                    # Send confirmation
+                    status_emoji = "✅" if action == "approve" else "❌"
+                    confirmation_text = (
+                        f"{status_emoji} **Validation {action.upper()}**\n\n"
+                        f"Request ID: `{request_id}`\n"
+                        f"Status: {result['status']}\n"
+                    )
+
+                    if result.get("success") and result.get("workflow_result"):
+                        workflow_result = result["workflow_result"]
+                        confirmation_text += f"\n**Résultat du workflow:**\n```json\n{json.dumps(workflow_result, indent=2, ensure_ascii=False)[:500]}```"
+
+                    # Update message
+                    await update.callback_query.edit_message_text(
+                        text=confirmation_text,
+                        parse_mode="Markdown"
+                    )
+
+                    await update.callback_query.answer(f"{status_emoji} Validation {action} effectuée")
+
+                    logger.info(
+                        "telegram_webhook_processed",
+                        request_id=request_id,
+                        action=action,
+                        success=result.get("success")
+                    )
+
+                except HTTPException as e:
+                    await update.callback_query.answer(f"❌ Erreur: {e.detail}", show_alert=True)
+                    logger.error("telegram_webhook_processing_error", error=e.detail)
+
+                except Exception as e:
+                    await update.callback_query.answer(f"❌ Erreur interne: {str(e)}", show_alert=True)
+                    logger.error("telegram_webhook_unexpected_error", error=str(e))
+
+            else:
+                await update.callback_query.answer("Action inconnue")
+
+        return {"ok": True}
+
+    except json.JSONDecodeError:
+        logger.error("telegram_webhook_invalid_json")
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    except Exception as e:
+        logger.error("telegram_webhook_error", error=str(e))
+        return {"ok": False, "error": str(e)}
+
+# ============================================================================
 # LIFECYCLE
 # ============================================================================
 
@@ -541,12 +671,58 @@ async def startup_event():
     # Initialize shared HTTP client
     await init_shared_client()
 
+    # Configure Telegram webhook for HITL (if enabled)
+    if settings.hitl_enabled and settings.telegram_token and settings.telegram_webhook_url:
+        try:
+            from telegram import Bot
+            from apscheduler.schedulers.asyncio import AsyncIOScheduler
+            from utils.hitl import timeout_expired_requests
+
+            bot = Bot(token=settings.telegram_token)
+
+            # Set webhook
+            webhook_info = await bot.get_webhook_info()
+            if webhook_info.url != settings.telegram_webhook_url:
+                await bot.set_webhook(
+                    url=settings.telegram_webhook_url,
+                    secret_token=settings.telegram_webhook_secret,
+                    drop_pending_updates=True  # Clear old updates
+                )
+                logger.info(
+                    "telegram_webhook_configured",
+                    url=settings.telegram_webhook_url
+                )
+            else:
+                logger.info("telegram_webhook_already_configured", url=webhook_info.url)
+
+            # Schedule timeout cleanup job (every 5 minutes)
+            scheduler = AsyncIOScheduler()
+            scheduler.add_job(
+                timeout_expired_requests,
+                "interval",
+                minutes=5,
+                id="hitl_timeout_cleanup"
+            )
+            scheduler.start()
+
+            logger.info("hitl_system_initialized", scheduler="active")
+
+        except Exception as e:
+            logger.error("telegram_webhook_setup_failed", error=str(e))
+            # Don't fail startup if webhook setup fails
+    elif settings.hitl_enabled:
+        logger.warning(
+            "hitl_enabled_but_not_configured",
+            missing="telegram_token or telegram_webhook_url"
+        )
+
     logger.info(
         "proxy_starting",
         environment=settings.environment,
         project_ref=settings.supabase_project_ref[:8] + "...",
         rate_limit=settings.rate_limit,
-        auth_enabled=True
+        auth_enabled=True,
+        hitl_enabled=settings.hitl_enabled
     )
 
 

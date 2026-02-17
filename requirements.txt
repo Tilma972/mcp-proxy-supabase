@@ -5,3 +5,5 @@ pydantic-settings==2.1.0
 structlog==24.1.0
 slowapi==0.1.9
 tenacity==8.2.3
+python-telegram-bot==21.0
+apscheduler==3.10.4

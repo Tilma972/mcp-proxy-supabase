@@ -323,10 +323,37 @@ async def create_and_send_facture_handler(params: Dict[str, Any]):
 
     Combines create_facture + send_facture_email into one operation.
     Orchestrates cross-domain handlers (factures + communication).
+
+    HITL Integration:
+    - Validates if human approval required (amount > threshold, new client)
+    - If required, pauses workflow and sends Telegram notification
+    - Resumes automatically after webhook response
     """
     logger.info("workflow_create_and_send_facture_start")
 
     try:
+        # HITL: Check if validation required
+        from utils.hitl import needs_hitl_validation, perform_human_validation
+
+        if await needs_hitl_validation("create_and_send_facture", params):
+            logger.info("workflow_hitl_validation_required")
+
+            # Prepare validation context
+            validation_context = {
+                "montant": f"{params.get('montant', 0)} EUR",
+                "qualification_id": params.get("qualification_id"),
+                "description": params.get("description", "N/A")
+            }
+
+            # Pause workflow and request human validation
+            return await perform_human_validation(
+                workflow_name="create_and_send_facture",
+                tool_name="create_and_send_facture",
+                params=params,
+                validation_context=validation_context
+            )
+
+        # Continue normal workflow if no validation required
         # Step 1: Create invoice (import from factures domain - top-level import)
         logger.debug("workflow_step_1_create_facture")
         facture_result = await create_facture_handler({
