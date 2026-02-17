@@ -6,6 +6,8 @@ from enum import Enum
 from typing import Dict, Callable, Awaitable, Any, Optional
 from dataclasses import dataclass
 import structlog
+import httpx
+from fastapi import HTTPException
 
 logger = structlog.get_logger()
 
@@ -91,6 +93,7 @@ async def dispatch_tool(tool_name: str, params: Dict[str, Any]) -> Any:
 
     Raises:
         ValueError: If tool not found in registry
+        HTTPException: 503 if worker unavailable, 422 if validation fails
     """
     tool = TOOL_REGISTRY.get(tool_name)
 
@@ -116,7 +119,156 @@ async def dispatch_tool(tool_name: str, params: Dict[str, Any]) -> Any:
 
         return result
 
+    except HTTPException:
+        # Re-raise HTTPException as-is (422 validation, 404 not found, etc.)
+        raise
+
+    except RuntimeError as e:
+        error_msg = str(e)
+
+        # Map worker configuration errors to user-friendly messages
+        if "DATABASE_WORKER_URL not configured" in error_msg:
+            logger.warning(
+                "worker_not_configured",
+                tool_name=tool_name,
+                worker="database"
+            )
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": "service_unavailable",
+                    "message": "Le service d'écriture en base de données est temporairement indisponible. Seules les opérations de lecture sont disponibles.",
+                    "tool": tool_name,
+                    "category": tool.category.value
+                }
+            )
+
+        elif "DOCUMENT_WORKER_URL not configured" in error_msg:
+            logger.warning(
+                "worker_not_configured",
+                tool_name=tool_name,
+                worker="document"
+            )
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": "service_unavailable",
+                    "message": "Le service de génération de documents PDF est temporairement indisponible. Les opérations de lecture et d'écriture en base restent disponibles.",
+                    "tool": tool_name,
+                    "category": tool.category.value
+                }
+            )
+
+        elif "STORAGE_WORKER_URL not configured" in error_msg:
+            logger.warning(
+                "worker_not_configured",
+                tool_name=tool_name,
+                worker="storage"
+            )
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": "service_unavailable",
+                    "message": "Le service de stockage de fichiers est temporairement indisponible. Les opérations de lecture et d'écriture en base restent disponibles.",
+                    "tool": tool_name,
+                    "category": tool.category.value
+                }
+            )
+
+        elif "EMAIL_WORKER_URL not configured" in error_msg:
+            logger.warning(
+                "worker_not_configured",
+                tool_name=tool_name,
+                worker="email"
+            )
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": "service_unavailable",
+                    "message": "Le service d'envoi d'emails est temporairement indisponible. Les opérations de lecture et d'écriture en base restent disponibles.",
+                    "tool": tool_name,
+                    "category": tool.category.value
+                }
+            )
+
+        else:
+            # Other RuntimeError - re-raise as-is
+            logger.error(
+                "tool_dispatch_error",
+                tool_name=tool_name,
+                category=tool.category.value,
+                error=error_msg,
+                error_type="RuntimeError"
+            )
+            raise
+
+    except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+        # Connection errors to workers
+        logger.error(
+            "worker_connection_error",
+            tool_name=tool_name,
+            category=tool.category.value,
+            error=str(e),
+            error_type=type(e).__name__
+        )
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "service_unavailable",
+                "message": "Un service externe requis pour cette opération est temporairement inaccessible. Veuillez réessayer dans quelques instants.",
+                "tool": tool_name,
+                "category": tool.category.value
+            }
+        )
+
+    except httpx.TimeoutException as e:
+        # Timeout errors
+        logger.error(
+            "worker_timeout_error",
+            tool_name=tool_name,
+            category=tool.category.value,
+            error=str(e)
+        )
+        raise HTTPException(
+            status_code=504,
+            detail={
+                "error": "gateway_timeout",
+                "message": "L'opération a pris trop de temps à s'exécuter. Le service est peut-être surchargé. Veuillez réessayer.",
+                "tool": tool_name,
+                "category": tool.category.value
+            }
+        )
+
+    except httpx.HTTPStatusError as e:
+        # HTTP errors from workers (4xx, 5xx)
+        status_code = e.response.status_code
+        logger.error(
+            "worker_http_error",
+            tool_name=tool_name,
+            category=tool.category.value,
+            status_code=status_code,
+            error=str(e)
+        )
+
+        # Try to extract error detail from worker response
+        try:
+            error_detail = e.response.json()
+        except Exception:
+            error_detail = {"message": e.response.text or "Erreur serveur"}
+
+        raise HTTPException(
+            status_code=status_code,
+            detail={
+                "error": "worker_error",
+                "message": f"Le service a retourné une erreur : {error_detail.get('message', 'Erreur inconnue')}",
+                "tool": tool_name,
+                "category": tool.category.value,
+                "worker_detail": error_detail
+            }
+        )
+
     except Exception as e:
+        # Catch-all for unexpected errors
         logger.error(
             "tool_dispatch_error",
             tool_name=tool_name,

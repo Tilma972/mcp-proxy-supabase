@@ -114,6 +114,17 @@ async def health_workers():
 
     Tests connectivity to each worker URL with a short timeout.
     No auth required (same as /health).
+
+    USAGE RECOMMENDATIONS:
+    - Call this ONCE at bot startup to identify available services
+    - Do NOT call before each tool request (adds unnecessary latency)
+    - The proxy now returns user-friendly 503 errors when workers are down
+    - Claude can interpret these 503 messages and inform the user directly
+
+    Example bot startup flow:
+        1. GET /health/workers → Check what's available
+        2. Store available categories in bot state
+        3. On tool errors, let proxy error messages guide Claude's response
     """
     from utils.http_client import get_shared_client
 
