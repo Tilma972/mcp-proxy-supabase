@@ -64,7 +64,7 @@ GENERATE_FACTURE_PDF_SCHEMA = ToolSchema(
 
 CREATE_AND_SEND_FACTURE_SCHEMA = ToolSchema(
     name="create_and_send_facture",
-    description="Workflow complet : Cree facture -> Genere PDF -> Upload -> Envoie email. Simplifie creation + envoi en une seule operation.",
+    description="Workflow complet : Cree facture -> (optionnel: marque payee) -> Genere PDF -> Upload -> Envoie email. Simplifie creation + envoi en une seule operation.",
     input_schema={
         "type": "object",
         "properties": {
@@ -75,6 +75,11 @@ CREATE_AND_SEND_FACTURE_SCHEMA = ToolSchema(
             "montant": {
                 "type": "number",
                 "description": "Montant de la facture en euros (requis)"
+            },
+            "mark_as_paid": {
+                "type": "boolean",
+                "description": "Marquer la facture comme payee avant de generer le PDF (defaut: false). Genere alors template facture acquittee.",
+                "default": False
             },
             "description": {
                 "type": "string",
@@ -371,6 +376,21 @@ async def create_and_send_facture_handler(params: Dict[str, Any]):
                 status_code=500,
                 detail="Failed to create invoice: no facture_id returned"
             )
+
+        # Step 1b: Mark as paid if requested
+        if params.get("mark_as_paid", False):
+            logger.debug("workflow_step_1b_mark_as_paid", facture_id=facture_id)
+            await call_database_worker(
+                f"/facture/{facture_id}",
+                {
+                    "payment_status": "paid",
+                    "statut": "payee",
+                    "date_paiement": datetime.utcnow().date().isoformat()
+                },
+                method="PUT",
+                require_validation=False
+            )
+            logger.info("workflow_facture_marked_paid", facture_id=facture_id)
 
         # Step 2: Send (call local workflow handler - same file)
         logger.debug("workflow_step_2_send_facture", facture_id=facture_id)
