@@ -1,5 +1,32 @@
 # FlowChat MCP Unified Proxy - Project Documentation
 
+## Déploiement
+
+**Plateforme** : Coolify (self-hosted sur VPS)
+**Méthode** : `git push` sur `main` → Coolify détecte le push GitHub et redémarre automatiquement le service
+**URL déployée** : https://supabase.dsolution-ia.fr
+**Repo GitHub** : github.com/Tilma972/mcp-proxy-supabase
+
+**Workflow de déploiement** :
+```bash
+git add <fichiers>
+git commit -m "fix: description"
+git push  # Coolify redémarre automatiquement
+```
+
+**Services liés** :
+| Service | URL |
+|---|---|
+| FlowChat Bot | github.com/Tilma972/flowchat |
+| Database Worker | https://database.dsolution-ia.fr |
+| Document Worker | https://documents.dsolution-ia.fr |
+| Storage Worker | https://storage.dsolution-ia.fr |
+| Email Worker | https://email.dsolution-ia.fr |
+| Supabase | https://wetwofwmfpvnvplytldh.supabase.co |
+| n8n | https://n8n.dsolution-ia.fr |
+
+---
+
 ## Project Overview
 
 This is a **unified MCP (Model Context Protocol) proxy** that centralizes access to FlowChat CRM tools for the Claude API. It solves a critical token budget problem by reducing tool definitions from 51,000 tokens to ~2,000 tokens.
