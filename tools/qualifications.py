@@ -46,8 +46,8 @@ SEARCH_QUALIFICATIONS_SCHEMA = ToolSchema(
         "properties": {
             "statut": {
                 "type": "string",
-                "description": "Statut de la qualification (en_cours, gagne, perdu, annule)",
-                "enum": ["en_cours", "gagne", "perdu", "annule"]
+                "description": "Statut de la qualification (Nouveau, BC envoyé, Qualifié, Terminé)",
+                "enum": ["Nouveau", "BC envoyé", "Qualifié", "Terminé"]
             },
             "start_date": {
                 "type": "string",
@@ -81,7 +81,7 @@ UPSERT_QUALIFICATION_SCHEMA = ToolSchema(
             "statut": {
                 "type": "string",
                 "description": "Statut de la qualification (requis)",
-                "enum": ["en_cours", "gagne", "perdu", "annule"]
+                "enum": ["Nouveau", "BC envoyé", "Qualifié", "Terminé"]
             },
             "montant_estime": {
                 "type": "number",
