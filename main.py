@@ -814,6 +814,52 @@ async def webhook_new_client(request: Request):
     return {"status": "accepted", "entreprise_id": entreprise_id, "email": email}
 
 
+@app.post("/internal/send-plaquette")
+async def internal_send_plaquette(request: Request):
+    """
+    Endpoint interne appelé par le FlowChat FSM (/plaquette command).
+    Authentifié par X-FlowChat-Worker-Auth.
+    Appel synchrone — retourne le résultat complet (pas fire-and-forget).
+
+    Body: {
+        "entreprise_id": "...",
+        "prospecteur_nom":       (optionnel),
+        "prospecteur_telephone": (optionnel),
+        "prospecteur_email":     (optionnel),
+        "message":               (optionnel)
+    }
+    """
+    auth_key = request.headers.get("X-FlowChat-Worker-Auth", "")
+    if settings.worker_auth_key and auth_key != settings.worker_auth_key:
+        logger.warning("internal_send_plaquette_unauthorized")
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    entreprise_id = body.get("entreprise_id")
+    if not entreprise_id:
+        raise HTTPException(status_code=422, detail="entreprise_id required")
+
+    logger.info("internal_send_plaquette_called", entreprise_id=entreprise_id)
+
+    try:
+        from tools.workflows import send_plaquette_to_entreprise_handler
+        params = {
+            "entreprise_id": entreprise_id,
+            **{k: v for k, v in body.items() if k != "entreprise_id" and v is not None},
+        }
+        result = await send_plaquette_to_entreprise_handler(params)
+        return {"status": "ok", **result}
+    except Exception as e:
+        logger.error("internal_send_plaquette_failed", entreprise_id=entreprise_id, error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+
 if __name__ == "__main__":
     uvicorn.run(
         app,
