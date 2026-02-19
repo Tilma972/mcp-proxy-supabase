@@ -269,6 +269,25 @@ async def some_handler():
 | `send_facture_email` | WORKFLOW | Genere PDF + upload + envoie email |
 | `generate_monthly_report` | WORKFLOW | Rapport mensuel PDF avec stats |
 
+### workflows.py - Plaquette commerciale (1 tool)
+
+| Tool | Type | Description |
+|------|------|-------------|
+| `send_plaquette_to_entreprise` | WORKFLOW | Génère PDF plaquette 2027, upload, envoie email |
+
+**Paramètres** : `entreprise_id` (requis), `recipient_email` (override email), `prospecteur_*`, `message`
+
+**Étapes** :
+1. `get_entreprise_by_id` → nom, email, contact_nom
+2. `get_qualifications_by_entreprise` → détecte `type_client` (renouvellement si qual Payé/Terminé)
+3. `call_document_worker("/generate/plaquette")` → pdf_base64
+4. `call_storage_worker("/upload/base64", bucket="plaquettes")` → pdf_url
+5. `call_email_worker("/send/plaquette")` → email envoyé
+6. Retourne `{success, entreprise_nom, email, type_client, pdf_url}`
+
+**Usage LLM** : outil de fallback (email incorrect, relance, override manuel).
+Pour l'envoi courant, utiliser la commande Telegram `/plaquette` (FSM déterministe, 0 token).
+
 ### analytics.py - Reporting (placeholder futur)
 
 Prevu : `dashboard_stats`, `export_campaign_report`, `forecast_revenue`
@@ -701,6 +720,31 @@ The project is deployed on Coolify. See existing Dockerfile.
    - Never commit `.env` to git
    - Use environment variables in production
    - Rotate keys periodically
+
+---
+
+## Endpoints spéciaux (hors MCP tools)
+
+### POST /webhook/new-client
+
+Reçoit un webhook Supabase Database Hook sur `INSERT` dans la table `entreprise`.
+
+- **Auth** : header `x-webhook-secret` (valeur = `TELEGRAM_WEBHOOK_SECRET`)
+- **Payload** : `{"type": "INSERT", "record": {...}}`
+- **Comportement** :
+  - Email présent → `asyncio.create_task` (fire-and-forget) appelle `send_plaquette_to_entreprise_handler`, répond 200 immédiatement
+  - Email absent → notification Telegram admin + retourne `{status: "skipped"}`
+  - Succès/échec → notification Telegram
+- **Configuration Supabase** : Table `entreprise` | Event `INSERT` | URL `https://supabase.dsolution-ia.fr/webhook/new-client`
+
+### POST /internal/send-plaquette
+
+Endpoint interne appelé par le FlowChat FSM (`/plaquette` Telegram command).
+
+- **Auth** : header `X-FlowChat-Worker-Auth`
+- **Body** : `{"entreprise_id": "...", ...options}`
+- **Comportement** : appel **synchrone** (retourne le résultat complet, timeout 90s côté client)
+- **Usage** : appelé par `flowChat/src/telegram/plaquette_handler.py` uniquement
 
 ---
 
