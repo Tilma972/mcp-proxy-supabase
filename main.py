@@ -734,6 +734,86 @@ async def shutdown_event():
 
     logger.info("proxy_shutdown")
 
+
+# ============================================================================
+# WEBHOOK — Nouveau Client (Supabase DB Hook → envoi plaquette automatique)
+# ============================================================================
+
+@app.post("/webhook/new-client")
+async def webhook_new_client(request: Request):
+    """
+    Reçoit un webhook Supabase Database Hook sur INSERT dans la table entreprise.
+    Si l'entreprise a un email → envoie automatiquement la plaquette 2027.
+    Si pas d'email → notifie Telegram pour traitement manuel.
+
+    Configuration Supabase :
+      Table: entreprise | Event: INSERT
+      URL: https://<domain>/webhook/new-client
+      Header: x-webhook-secret: <telegram_webhook_secret>
+    """
+    # Vérification du secret webhook
+    webhook_secret = settings.telegram_webhook_secret
+    if webhook_secret:
+        sig = request.headers.get("x-webhook-secret", "")
+        if sig != webhook_secret:
+            logger.warning("webhook_new_client_unauthorized")
+            raise HTTPException(status_code=401, detail="Invalid webhook secret")
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    # Supabase DB Hook: {"type": "INSERT", "record": {...}}
+    record        = body.get("record") or body
+    entreprise_id = record.get("id")
+    email         = record.get("email")
+    nom           = record.get("nom", "Nouveau client")
+
+    logger.info("webhook_new_client_received", entreprise_id=entreprise_id, nom=nom, has_email=bool(email))
+
+    if not entreprise_id:
+        return {"status": "ignored", "reason": "no entreprise_id in payload"}
+
+    async def _notify_telegram(text: str):
+        if settings.telegram_token and settings.telegram_admin_id:
+            try:
+                from telegram import Bot
+                bot = Bot(token=settings.telegram_token)
+                await bot.send_message(chat_id=settings.telegram_admin_id, text=text, parse_mode="Markdown")
+            except Exception as tg_err:
+                logger.warning("webhook_telegram_notify_failed", error=str(tg_err))
+
+    if not email:
+        await _notify_telegram(
+            f"⚠️ *Nouveau client sans email*\n\n"
+            f"🏢 *{nom}*\n🆔 `{entreprise_id}`\n\n"
+            f"Plaquette non envoyée. Complétez l'email puis utilisez `send_plaquette_to_entreprise`."
+        )
+        return {"status": "skipped", "reason": "no_email", "entreprise_id": entreprise_id}
+
+    # Fire-and-forget : répond 200 immédiatement
+    import asyncio
+
+    async def _send():
+        try:
+            from tools.workflows import send_plaquette_to_entreprise_handler
+            result = await send_plaquette_to_entreprise_handler({"entreprise_id": entreprise_id})
+            await _notify_telegram(
+                f"📨 *Plaquette 2027 envoyée*\n\n🏢 *{nom}*\n📧 {email}\n🆔 `{entreprise_id}`"
+            )
+            logger.info("webhook_plaquette_sent", entreprise_id=entreprise_id, email=email)
+        except Exception as e:
+            logger.error("webhook_plaquette_failed", entreprise_id=entreprise_id, error=str(e))
+            await _notify_telegram(
+                f"❌ *Erreur envoi plaquette*\n\n🏢 *{nom}* ({email})\n"
+                f"`{str(e)[:200]}`\n\nUtilise `send_plaquette_to_entreprise` ID `{entreprise_id}`."
+            )
+
+    asyncio.create_task(_send())
+    return {"status": "accepted", "entreprise_id": entreprise_id, "email": email}
+
+
 if __name__ == "__main__":
     uvicorn.run(
         app,

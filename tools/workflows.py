@@ -156,6 +156,48 @@ GENERATE_MONTHLY_REPORT_SCHEMA = ToolSchema(
     category="workflow"
 )
 
+SEND_PLAQUETTE_SCHEMA = ToolSchema(
+    name="send_plaquette_to_entreprise",
+    description=(
+        "Workflow complet : Recupere les infos d'une entreprise -> "
+        "Genere la plaquette commerciale 2027 personnalisee (PDF) -> "
+        "Upload sur storage -> Envoie par email. "
+        "Adapte automatiquement le message selon l'historique client (nouveau / renouvellement). "
+        "Utilise ce tool si le webhook automatique a echoue (email manquant, erreur) ou pour un envoi manuel."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "entreprise_id": {
+                "type": "string",
+                "description": "UUID de l'entreprise destinataire (requis)"
+            },
+            "recipient_email": {
+                "type": "string",
+                "description": "Email de remplacement si l'entreprise n'en a pas en base"
+            },
+            "prospecteur_nom": {
+                "type": "string",
+                "description": "Nom du prospecteur a afficher dans la plaquette (optionnel)"
+            },
+            "prospecteur_telephone": {
+                "type": "string",
+                "description": "Telephone du prospecteur (optionnel)"
+            },
+            "prospecteur_email": {
+                "type": "string",
+                "description": "Email du prospecteur (optionnel)"
+            },
+            "message": {
+                "type": "string",
+                "description": "Message personnalise dans l'email d'accompagnement (optionnel)"
+            }
+        },
+        "required": ["entreprise_id"]
+    },
+    category="workflow"
+)
+
 
 # ============================================================================
 # HANDLERS
@@ -670,6 +712,162 @@ async def generate_monthly_report_handler(params: Dict[str, Any]):
         raise
 
 
+@register_tool(
+    name="send_plaquette_to_entreprise",
+    category=ToolCategory.WORKFLOW,
+    description_short="Genere et envoie la plaquette 2027 a une entreprise"
+)
+async def send_plaquette_to_entreprise_handler(params: Dict[str, Any]):
+    """
+    Workflow: Fetch entreprise + historique → Generate plaquette PDF → Upload → Send email → Telegram notif
+
+    Steps:
+    1. Fetch entreprise data (nom, email, contact_nom, ville)
+    2. Fetch dernière qualification payée → détermine type_client
+    3. Generate plaquette PDF (document-worker)
+    4. Upload PDF to storage (storage-worker)
+    5. Send email with PDF attachment (email-worker)
+    6. Return summary
+    """
+    entreprise_id   = params["entreprise_id"]
+    recipient_email = params.get("recipient_email")
+    prospecteur_nom = params.get("prospecteur_nom")
+    prospecteur_tel = params.get("prospecteur_telephone")
+    prospecteur_eml = params.get("prospecteur_email")
+    message         = params.get("message", "")
+
+    logger.info("workflow_send_plaquette_start", entreprise_id=entreprise_id)
+
+    try:
+        # Step 1: Fetch entreprise
+        entreprise_list = await call_supabase_rpc("get_entreprise_by_id", {"p_id": entreprise_id})
+        if not entreprise_list:
+            raise HTTPException(status_code=404, detail=f"Entreprise {entreprise_id} not found")
+        entreprise = entreprise_list[0] if isinstance(entreprise_list, list) else entreprise_list
+
+        email = recipient_email or entreprise.get("email")
+        if not email:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Entreprise '{entreprise.get('nom')}' n'a pas d'email en base. "
+                    "Fournissez recipient_email pour forcer l'envoi."
+                )
+            )
+
+        entreprise_nom = entreprise.get("nom", "")
+        contact_nom    = entreprise.get("contact_nom") or entreprise.get("contact") or ""
+
+        # Step 2: Determine type_client from qualification history
+        type_client      = "nouveau"
+        annee_precedente = None
+        format_precedent = None
+        try:
+            qualifs = await call_supabase_rpc("get_qualifications_by_entreprise", {
+                "p_entreprise_id": entreprise_id,
+                "p_limit": 5
+            })
+            if qualifs:
+                # Look for a paid/completed qualification
+                paid = [q for q in qualifs if q.get("statut") in ("Payé", "Terminé", "payee", "paid")]
+                if paid:
+                    type_client = "renouvellement"
+                    last = paid[0]
+                    created = last.get("created_at", "")
+                    annee_precedente = str(created)[:4] if created else None
+                    format_precedent = last.get("format_encart")
+        except Exception as e:
+            logger.warning("workflow_plaquette_qualif_fetch_failed", error=str(e))
+
+        logger.info(
+            "workflow_plaquette_context",
+            entreprise=entreprise_nom,
+            type_client=type_client,
+            email=email
+        )
+
+        # Step 3: Generate PDF
+        pdf_result = await call_document_worker(
+            "/generate/plaquette",
+            {
+                "request_id": request_id_ctx.get() or str(uuid.uuid4()),
+                "entreprise_nom":       entreprise_nom,
+                "contact_nom":          contact_nom,
+                "prospecteur_nom":      prospecteur_nom,
+                "prospecteur_telephone": prospecteur_tel,
+                "prospecteur_email":    prospecteur_eml,
+                "type_client":          type_client,
+                "annee_precedente":     annee_precedente,
+                "format_precedent":     format_precedent,
+            }
+        )
+
+        pdf_base64 = pdf_result.get("pdf_base64")
+        if not pdf_base64:
+            raise HTTPException(status_code=500, detail="Plaquette PDF generated but no pdf_base64 returned")
+
+        # Step 4: Upload PDF
+        safe_nom     = (entreprise_nom or "generique").replace(" ", "_").replace("/", "-")[:40]
+        filename     = f"Plaquette_2027_{safe_nom}.pdf"
+        storage_path = f"2027/{filename}"
+        upload_result = await call_storage_worker(
+            "/upload/base64",
+            {
+                "bucket":       "plaquettes",
+                "filename":     filename,
+                "content":      pdf_base64,
+                "content_type": "application/pdf",
+                "path":         storage_path,
+                "upsert":       "true",
+                "request_id":   request_id_ctx.get() or str(uuid.uuid4())
+            },
+            use_form_data=True
+        )
+        pdf_url = upload_result.get("public_url") or upload_result.get("url") or upload_result.get("signed_url")
+
+        # Step 5: Send email
+        await call_email_worker(
+            "/send/plaquette",
+            {
+                "to":                  email,
+                "entreprise_nom":      entreprise_nom,
+                "contact_nom":         contact_nom,
+                "type_client":         type_client,
+                "annee_precedente":    annee_precedente,
+                "format_precedent":    format_precedent,
+                "prospecteur_nom":     prospecteur_nom,
+                "prospecteur_telephone": prospecteur_tel,
+                "prospecteur_email":   prospecteur_eml,
+                "message":             message,
+                "pdf_base64":          pdf_base64,
+                "pdf_filename":        filename,
+            }
+        )
+
+        logger.info(
+            "workflow_send_plaquette_complete",
+            entreprise=entreprise_nom,
+            email=email,
+            type_client=type_client,
+            pdf_url=pdf_url
+        )
+
+        return {
+            "success":        True,
+            "entreprise_nom": entreprise_nom,
+            "email":          email,
+            "type_client":    type_client,
+            "pdf_url":        pdf_url,
+            "message":        f"Plaquette 2027 envoyée à {entreprise_nom} ({email})"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("workflow_send_plaquette_error", entreprise_id=entreprise_id, error=str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to send plaquette: {str(e)}")
+
+
 # ============================================================================
 # SCHEMA REGISTRY
 # ============================================================================
@@ -679,6 +877,7 @@ WORKFLOW_SCHEMAS = {
     "create_and_send_facture": CREATE_AND_SEND_FACTURE_SCHEMA,
     "send_facture_email": SEND_FACTURE_EMAIL_SCHEMA,
     "generate_monthly_report": GENERATE_MONTHLY_REPORT_SCHEMA,
+    "send_plaquette_to_entreprise": SEND_PLAQUETTE_SCHEMA,
 }
 
 

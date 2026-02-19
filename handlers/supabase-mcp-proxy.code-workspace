@@ -1,0 +1,17 @@
+{
+	"folders": [
+		{
+			"path": ".."
+		},
+		{
+			"path": "../../flowChat"
+		},
+		{
+			"path": "../../document-generator-worker"
+		},
+		{
+			"path": "../../storage-manager-worker"
+		}
+	],
+	"settings": {}
+}
