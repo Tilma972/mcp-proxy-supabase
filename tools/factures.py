@@ -212,9 +212,8 @@ async def create_facture_handler(params: Dict[str, Any]):
         endpoint="/facture/create",
         payload={
             "qualification_id": params["qualification_id"],
-            "montant": params["montant"],
+            "montant_ht": params["montant"],   # le worker attend "montant_ht"
             "description": params.get("description"),
-            "date_emission": params.get("date_emission"),
             "date_echeance": params.get("date_echeance")
         },
         method="POST",

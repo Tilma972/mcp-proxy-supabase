@@ -196,17 +196,23 @@ async def generate_facture_pdf_handler(params: Dict[str, Any]):
 
         # Step 2: Check if PDF already exists
         if not force_regenerate and facture.get("pdf_url") and facture.get("pdf_status") == "generated":
-            logger.info("workflow_pdf_already_exists", pdf_url=facture["pdf_url"])
-            return {
-                "success": True,
-                "facture_id": facture_id,
-                "pdf_url": facture["pdf_url"],
-                "pdf_status": "generated",
-                "message": "PDF already exists (use force_regenerate=true to regenerate)"
-            }
+            # For paid invoices, check acquittee URL specifically
+            payment_status = facture.get("payment_status", "pending")
+            is_paid = payment_status == "paid"
+            existing_url = facture.get("pdf_acquittee_url") if is_paid else facture.get("pdf_url")
+            if existing_url:
+                logger.info("workflow_pdf_already_exists", pdf_url=existing_url, is_paid=is_paid)
+                return {
+                    "success": True,
+                    "facture_id": facture_id,
+                    "pdf_url": existing_url,
+                    "pdf_status": "generated",
+                    "is_paid": is_paid,
+                    "message": "PDF already exists (use force_regenerate=true to regenerate)"
+                }
 
         # Step 3: Determine payment flag for document-worker
-        payment_status = facture.get("payment_status", "unpaid")
+        payment_status = facture.get("payment_status", "pending")
         is_paid = payment_status == "paid"
         qualification_id = facture.get("qualification_id")
 
@@ -252,7 +258,11 @@ async def generate_facture_pdf_handler(params: Dict[str, Any]):
             )
 
         # Step 4: Upload PDF to storage-worker (base64 upload API)
-        filename = f"{numero_facture}.pdf"
+        # Paid invoices get a distinct filename to preserve the original emise PDF
+        if is_paid:
+            filename = f"{numero_facture}_acquittee.pdf"
+        else:
+            filename = f"{numero_facture}.pdf"
         # Combine year folder + filename into a single path
         storage_path = f"{year}/{filename}"
         upload_result = await call_storage_worker(
@@ -278,12 +288,14 @@ async def generate_facture_pdf_handler(params: Dict[str, Any]):
             )
 
         # Step 5: Update invoice status in DB
-        logger.debug("workflow_step_5_update_status", facture_id=facture_id, pdf_url=pdf_url)
+        # Paid PDF → pdf_acquittee_url, emise PDF → pdf_url
+        url_field = "pdf_acquittee_url" if is_paid else "pdf_url"
+        logger.debug("workflow_step_5_update_status", facture_id=facture_id, url_field=url_field, pdf_url=pdf_url)
         await call_database_worker(
             f"/facture/{facture_id}",
             {
                 "pdf_status": "generated",
-                "pdf_url": pdf_url
+                url_field: pdf_url
             },
             method="PUT",
             require_validation=False
@@ -292,7 +304,8 @@ async def generate_facture_pdf_handler(params: Dict[str, Any]):
         logger.info(
             "workflow_generate_facture_pdf_complete",
             facture_id=facture_id,
-            pdf_url=pdf_url
+            pdf_url=pdf_url,
+            is_paid=is_paid
         )
 
         return {
@@ -300,6 +313,7 @@ async def generate_facture_pdf_handler(params: Dict[str, Any]):
             "facture_id": facture_id,
             "pdf_url": pdf_url,
             "pdf_status": "generated",
+            "is_paid": is_paid,
             "numero_facture": numero_facture
         }
 

@@ -1,0 +1,24 @@
+{
+  "mcpServers": {
+    "flowchat-dev": {
+      "command": "python",
+      "args": ["C:/Users/calen/supabase-mcp-proxy/mcp_dev_server.py"],
+      "env": {
+        "PYTHONPATH": "C:/Users/calen/supabase-mcp-proxy",
+        "SUPABASE_PROJECT_REF": "your_project_ref",
+        "SUPABASE_PAT": "your_pat_token",
+        "SUPABASE_URL": "https://your-project.supabase.co",
+        "SUPABASE_API_KEY": "your_service_role_key",
+        "X_PROXY_KEY": "dev-key",
+        "FLOWCHAT_MCP_KEY": "dev-key",
+        "DATABASE_WORKER_URL": "http://localhost:8001",
+        "DOCUMENT_WORKER_URL": "http://localhost:8002",
+        "STORAGE_WORKER_URL": "http://localhost:8003",
+        "EMAIL_WORKER_URL": "http://localhost:8004",
+        "WORKER_AUTH_KEY": "your_worker_secret",
+        "ENVIRONMENT": "development",
+        "LOG_LEVEL": "DEBUG"
+      }
+    }
+  }
+}
