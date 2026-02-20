@@ -11,6 +11,9 @@ Schemas et handlers pour la gestion des entreprises :
 
 from typing import Dict, Any
 
+import structlog
+from fastapi import HTTPException
+
 from tools.base import (
     ToolSchema,
     register_tool,
@@ -186,7 +189,9 @@ async def get_stats_entreprises_handler(params: Dict[str, Any]):
 )
 async def upsert_entreprise_handler(params: Dict[str, Any]):
     """Create or update a company"""
-    return await call_database_worker(
+    logger = structlog.get_logger()
+
+    data = await call_database_worker(
         endpoint="/entreprise/upsert",
         payload={
             "nom": params["nom"],
@@ -196,8 +201,14 @@ async def upsert_entreprise_handler(params: Dict[str, Any]):
             "notes": params.get("notes")
         },
         method="POST",
-        require_validation=True
+        require_validation=False
     )
+
+    if data.get("id") is None:
+        logger.error("database_worker_validation_failed", endpoint="/entreprise/upsert", response=data)
+        raise HTTPException(status_code=422, detail="Validation failed: response missing 'id'")
+
+    return {**data, "validated": True}
 
 
 # ============================================================================

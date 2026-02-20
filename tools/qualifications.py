@@ -9,6 +9,9 @@ Schemas et handlers pour la gestion des qualifications :
 
 from typing import Dict, Any
 
+import structlog
+from fastapi import HTTPException
+
 from tools.base import (
     ToolSchema,
     register_tool,
@@ -140,7 +143,9 @@ async def search_qualifications_handler(params: Dict[str, Any]):
 )
 async def upsert_qualification_handler(params: Dict[str, Any]):
     """Create or update a qualification"""
-    return await call_database_worker(
+    logger = structlog.get_logger()
+
+    data = await call_database_worker(
         endpoint="/qualification/upsert",
         payload={
             "entreprise_id": params["entreprise_id"],
@@ -150,8 +155,14 @@ async def upsert_qualification_handler(params: Dict[str, Any]):
             "date_prevue": params.get("date_prevue")
         },
         method="POST",
-        require_validation=True
+        require_validation=False
     )
+
+    if data.get("id") is None:
+        logger.error("database_worker_validation_failed", endpoint="/qualification/upsert", response=data)
+        raise HTTPException(status_code=422, detail="Validation failed: response missing 'id'")
+
+    return {**data, "validated": True}
 
 
 # ============================================================================

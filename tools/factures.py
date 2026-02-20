@@ -208,7 +208,9 @@ async def get_facture_by_id_handler(params: Dict[str, Any]):
 )
 async def create_facture_handler(params: Dict[str, Any]):
     """Create a new invoice"""
-    return await call_database_worker(
+    logger = structlog.get_logger()
+
+    data = await call_database_worker(
         endpoint="/facture/create",
         payload={
             "qualification_id": params["qualification_id"],
@@ -217,8 +219,14 @@ async def create_facture_handler(params: Dict[str, Any]):
             "date_echeance": params.get("date_echeance")
         },
         method="POST",
-        require_validation=True
+        require_validation=False
     )
+
+    if data.get("id") is None:
+        logger.error("database_worker_validation_failed", endpoint="/facture/create", response=data)
+        raise HTTPException(status_code=422, detail="Validation failed: response missing 'id'")
+
+    return {**data, "validated": True}
 
 
 @register_tool(
@@ -228,9 +236,10 @@ async def create_facture_handler(params: Dict[str, Any]):
 )
 async def update_facture_handler(params: Dict[str, Any]):
     """Update an existing invoice"""
+    logger = structlog.get_logger()
     facture_id = params["facture_id"]
 
-    return await call_database_worker(
+    data = await call_database_worker(
         endpoint=f"/facture/{facture_id}",
         payload={
             "montant": params.get("montant"),
@@ -238,8 +247,14 @@ async def update_facture_handler(params: Dict[str, Any]):
             "date_echeance": params.get("date_echeance")
         },
         method="PUT",
-        require_validation=True
+        require_validation=False
     )
+
+    if str(data.get("id", "")) != facture_id:
+        logger.error("database_worker_validation_failed", endpoint=f"/facture/{facture_id}", response=data)
+        raise HTTPException(status_code=422, detail=f"Validation failed: response id '{data.get('id')}' != '{facture_id}'")
+
+    return {**data, "validated": True}
 
 
 @register_tool(
