@@ -777,15 +777,22 @@ async def webhook_new_client(request: Request):
 
     async def _notify_telegram(text: str):
         if not settings.telegram_token or not settings.telegram_admin_id:
+            logger.warning("webhook_telegram_notify_skipped", reason="token_or_admin_id_missing")
             return
-        from telegram import Bot
-        bot = Bot(token=settings.telegram_token)
+        bot = None
         try:
-            await bot.send_message(chat_id=settings.telegram_admin_id, text=text, parse_mode="Markdown")
+            from telegram import Bot
+            bot = Bot(token=settings.telegram_token)
+            await bot.send_message(
+                chat_id=settings.telegram_admin_id,
+                text=text,
+                parse_mode="Markdown"
+            )
         except Exception as tg_err:
             logger.warning("webhook_telegram_notify_failed", error=str(tg_err))
         finally:
-            await bot.close()
+            if bot:
+                await bot.close()
 
     if not email:
         await _notify_telegram(
