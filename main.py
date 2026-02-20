@@ -776,13 +776,16 @@ async def webhook_new_client(request: Request):
         return {"status": "ignored", "reason": "no entreprise_id in payload"}
 
     async def _notify_telegram(text: str):
-        if settings.telegram_token and settings.telegram_admin_id:
-            try:
-                from telegram import Bot
-                bot = Bot(token=settings.telegram_token)
-                await bot.send_message(chat_id=settings.telegram_admin_id, text=text, parse_mode="Markdown")
-            except Exception as tg_err:
-                logger.warning("webhook_telegram_notify_failed", error=str(tg_err))
+        if not settings.telegram_token or not settings.telegram_admin_id:
+            return
+        from telegram import Bot
+        bot = Bot(token=settings.telegram_token)
+        try:
+            await bot.send_message(chat_id=settings.telegram_admin_id, text=text, parse_mode="Markdown")
+        except Exception as tg_err:
+            logger.warning("webhook_telegram_notify_failed", error=str(tg_err))
+        finally:
+            await bot.close()
 
     if not email:
         await _notify_telegram(
@@ -798,11 +801,20 @@ async def webhook_new_client(request: Request):
     async def _send():
         try:
             from tools.workflows import send_plaquette_to_entreprise_handler
-            result = await send_plaquette_to_entreprise_handler({"entreprise_id": entreprise_id})
+            result = await asyncio.wait_for(
+                send_plaquette_to_entreprise_handler({"entreprise_id": entreprise_id}),
+                timeout=30
+            )
             await _notify_telegram(
                 f"📨 *Plaquette 2027 envoyée*\n\n🏢 *{nom}*\n📧 {email}\n🆔 `{entreprise_id}`"
             )
             logger.info("webhook_plaquette_sent", entreprise_id=entreprise_id, email=email)
+        except asyncio.TimeoutError:
+            logger.error("webhook_plaquette_timeout", entreprise_id=entreprise_id)
+            await _notify_telegram(
+                f"⏱ *Timeout envoi plaquette*\n\n🏢 *{nom}* ({email})\n🆔 `{entreprise_id}`\n\n"
+                f"L'envoi a dépassé 30s. Utilise `send_plaquette_to_entreprise` ID `{entreprise_id}`."
+            )
         except Exception as e:
             logger.error("webhook_plaquette_failed", entreprise_id=entreprise_id, error=str(e))
             await _notify_telegram(
