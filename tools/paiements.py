@@ -7,7 +7,11 @@ Schemas et handlers pour la gestion des paiements :
 - mark_facture_paid (WRITE)
 """
 
+from datetime import date
 from typing import Dict, Any
+
+import structlog
+from fastapi import HTTPException
 
 from tools.base import (
     ToolSchema,
@@ -120,18 +124,46 @@ async def get_revenue_stats_handler(params: Dict[str, Any]):
 )
 async def mark_facture_paid_handler(params: Dict[str, Any]):
     """Mark an invoice as paid"""
-    facture_id = params["facture_id"]
+    logger = structlog.get_logger()
 
-    return await call_database_worker(
+    facture_id = params["facture_id"]
+    payment_method = params.get("payment_method") or params.get("mode_paiement") or "non_précisé"
+    payment_date = params.get("payment_date") or date.today().isoformat()
+
+    # Call worker without built-in validation: the FactureResponse doesn't include
+    # a "validated" field, so we do field-level validation manually below.
+    data = await call_database_worker(
         endpoint=f"/facture/{facture_id}",
         payload={
+            "statut": "payee",
             "payment_status": "paid",
-            "payment_date": params.get("payment_date"),
-            "payment_method": params.get("payment_method")
+            "payment_date": payment_date,
+            "payment_method": payment_method
         },
         method="PUT",
-        require_validation=True
+        require_validation=False
     )
+
+    # Manual validation: both statut and payment_status must reflect the update
+    expected_fields = {"statut": "payee", "payment_status": "paid"}
+    discrepancies = [
+        f"{field} expected '{expected}' but got '{data.get(field)}'"
+        for field, expected in expected_fields.items()
+        if data.get(field) != expected
+    ]
+    if discrepancies:
+        logger.error(
+            "database_worker_validation_failed",
+            endpoint=f"/facture/{facture_id}",
+            discrepancies=discrepancies
+        )
+        raise HTTPException(
+            status_code=422,
+            detail=f"Validation failed: {discrepancies}"
+        )
+
+    # Worker (FactureResponse) doesn't return "validated"; add it after successful check
+    return {**data, "validated": True}
 
 
 # ============================================================================
