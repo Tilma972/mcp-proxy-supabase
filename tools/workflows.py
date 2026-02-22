@@ -161,7 +161,7 @@ SEND_PLAQUETTE_SCHEMA = ToolSchema(
     description=(
         "Workflow complet : Recupere les infos d'une entreprise -> "
         "Genere la plaquette commerciale 2027 personnalisee (PDF) -> "
-        "Upload sur storage -> Envoie par email. "
+        "Envoie par email (PDF joint en base64, sans upload storage). "
         "Adapte automatiquement le message selon l'historique client (nouveau / renouvellement). "
         "Utilise ce tool si le webhook automatique a echoue (email manquant, erreur) ou pour un envoi manuel."
     ),
@@ -719,15 +719,14 @@ async def generate_monthly_report_handler(params: Dict[str, Any]):
 )
 async def send_plaquette_to_entreprise_handler(params: Dict[str, Any]):
     """
-    Workflow: Fetch entreprise + historique → Generate plaquette PDF → Upload → Send email → Telegram notif
+    Workflow: Fetch entreprise + historique → Generate plaquette PDF → Send email (base64, no storage upload)
 
     Steps:
     1. Fetch entreprise data (nom, email, contact_nom, ville)
     2. Fetch dernière qualification payée → détermine type_client
     3. Generate plaquette PDF (document-worker)
-    4. Upload PDF to storage (storage-worker)
-    5. Send email with PDF attachment (email-worker)
-    6. Return summary
+    4. Send email with PDF as base64 attachment (email-worker)
+    5. Return summary
     """
     entreprise_id   = params["entreprise_id"]
     recipient_email = params.get("recipient_email")
@@ -806,26 +805,10 @@ async def send_plaquette_to_entreprise_handler(params: Dict[str, Any]):
         if not pdf_base64:
             raise HTTPException(status_code=500, detail="Plaquette PDF generated but no pdf_base64 returned")
 
-        # Step 4: Upload PDF
-        safe_nom     = (entreprise_nom or "generique").replace(" ", "_").replace("/", "-")[:40]
-        filename     = f"Plaquette_2027_{safe_nom}.pdf"
-        storage_path = f"2027/{filename}"
-        upload_result = await call_storage_worker(
-            "/upload/base64",
-            {
-                "bucket":       "plaquettes",
-                "filename":     filename,
-                "content":      pdf_base64,
-                "content_type": "application/pdf",
-                "path":         storage_path,
-                "upsert":       "true",
-                "request_id":   request_id_ctx.get() or str(uuid.uuid4())
-            },
-            use_form_data=True
-        )
-        pdf_url = upload_result.get("public_url") or upload_result.get("url") or upload_result.get("signed_url")
+        safe_nom = (entreprise_nom or "generique").replace(" ", "_").replace("/", "-")[:40]
+        filename = f"Plaquette_2027_{safe_nom}.pdf"
 
-        # Step 5: Send email
+        # Step 4: Send email with PDF as base64 (no storage upload needed for plaquettes)
         await call_email_worker(
             "/send/plaquette",
             {
@@ -848,8 +831,7 @@ async def send_plaquette_to_entreprise_handler(params: Dict[str, Any]):
             "workflow_send_plaquette_complete",
             entreprise=entreprise_nom,
             email=email,
-            type_client=type_client,
-            pdf_url=pdf_url
+            type_client=type_client
         )
 
         return {
@@ -857,7 +839,6 @@ async def send_plaquette_to_entreprise_handler(params: Dict[str, Any]):
             "entreprise_nom": entreprise_nom,
             "email":          email,
             "type_client":    type_client,
-            "pdf_url":        pdf_url,
             "message":        f"Plaquette 2027 envoyée à {entreprise_nom} ({email})"
         }
 
