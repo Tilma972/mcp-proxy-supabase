@@ -374,6 +374,98 @@ async def mcp_call_tool(
             detail=f"Tool execution failed: {str(e)}"
         )
 
+@app.post("/mcp/rest/v1/rpc/{function_name}")
+@limiter.limit(settings.rate_limit)
+async def proxy_rpc(
+    function_name: str,
+    request: Request,
+    authenticated: bool = Depends(verify_proxy_key)
+):
+    """
+    Forward RPC calls directly to Supabase PostgREST.
+
+    Accepts:
+      - X-Proxy-Key: <key>
+      - Authorization: Bearer <key>
+
+    Returns 404 if the function does not exist in Supabase.
+    """
+    from tools.base import call_supabase_rpc
+    import httpx as _httpx
+
+    start_time = time.time()
+    client_ip = request.client.host
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    logger.info(
+        "rpc_request_received",
+        function_name=function_name,
+        params_keys=list(body.keys()) if isinstance(body, dict) else [],
+        client_ip=client_ip,
+    )
+
+    try:
+        result = await call_supabase_rpc(function_name, body)
+
+        duration = time.time() - start_time
+        logger.info(
+            "rpc_request_completed",
+            function_name=function_name,
+            duration_ms=int(duration * 1000),
+            client_ip=client_ip,
+        )
+
+        return JSONResponse(content=result)
+
+    except _httpx.HTTPStatusError as e:
+        duration = time.time() - start_time
+        status = e.response.status_code
+
+        if status == 404:
+            logger.warning(
+                "rpc_function_not_found",
+                function_name=function_name,
+                client_ip=client_ip,
+                duration_ms=int(duration * 1000),
+            )
+            raise HTTPException(
+                status_code=404,
+                detail=f"RPC function '{function_name}' not found in Supabase"
+            )
+
+        logger.error(
+            "rpc_supabase_error",
+            function_name=function_name,
+            status_code=status,
+            error=str(e),
+            duration_ms=int(duration * 1000),
+            client_ip=client_ip,
+        )
+        raise HTTPException(
+            status_code=status,
+            detail=f"Supabase RPC error: {e.response.text}"
+        )
+
+    except Exception as e:
+        duration = time.time() - start_time
+        logger.error(
+            "rpc_unexpected_error",
+            function_name=function_name,
+            error=str(e),
+            error_type=type(e).__name__,
+            duration_ms=int(duration * 1000),
+            client_ip=client_ip,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"RPC call failed: {str(e)}"
+        )
+
+
 @app.api_route("/mcp/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
 @limiter.limit(settings.rate_limit)
 async def proxy_mcp(

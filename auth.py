@@ -13,14 +13,23 @@ logger = structlog.get_logger()
 
 def verify_proxy_key(
     x_proxy_key: Optional[str] = Header(None),
+    authorization: Optional[str] = Header(None),
     key: Optional[str] = None  # Permet de passer la clé via ?key=...
 ):
     """
-    Verify X-Proxy-Key header or query parameter for Supabase proxy access
+    Verify X-Proxy-Key header, Authorization: Bearer token, or query parameter.
 
     This is the original authentication for the Supabase MCP proxy endpoint.
+    Accepts:
+      - X-Proxy-Key: <key>
+      - Authorization: Bearer <key>
+      - ?key=<key> (query param)
     """
-    provided_key = x_proxy_key or key
+    bearer_token = None
+    if authorization and authorization.startswith("Bearer "):
+        bearer_token = authorization[7:]
+
+    provided_key = x_proxy_key or bearer_token or key
     if provided_key != settings.x_proxy_key:
         logger.warning("auth_failed", provided_key=provided_key[:8] if provided_key else None)
         raise HTTPException(
