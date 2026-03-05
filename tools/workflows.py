@@ -900,17 +900,23 @@ async def generate_bon_commande_handler(params: Dict[str, Any]):
         # Note: BonCommandeGenerateResponse returns document_type and bc_numero directly but might also be in metadata
         bc_numero = pdf_result.get("bc_numero") or metadata.get("bc_numero") or "BC-INCONNU"
         
-        # Step 3: Upload to storage
+        # Step 3: Upload to storage via form data
+        year = datetime.now().year
+        month = datetime.now().strftime('%m')
+        storage_path = f"bon_commandes/{year}/{month}/{bc_numero}.pdf"
+        
         upload_result = await call_storage_worker(
             "/upload/base64",
             {
                 "request_id": request_id_ctx.get() or str(uuid.uuid4()),
-                "bucket_name": "bon_commandes",
-                "file_name": f"{bc_numero}.pdf",
-                "folder_path": f"{datetime.now().year}/{datetime.now().strftime('%m')}",
-                "base64_data": pdf_base64,
-                "content_type": "application/pdf"
-            }
+                "bucket": "documents",          # Utilisation du bucket validé 'documents'
+                "filename": f"{bc_numero}.pdf",
+                "path": storage_path,
+                "content": pdf_base64,
+                "content_type": "application/pdf",
+                "upsert": "true"
+            },
+            use_form_data=True
         )
         
         pdf_url = upload_result.get("public_url")
