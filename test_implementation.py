@@ -3,7 +3,7 @@ Test script to verify FlowChat MCP Unified Proxy implementation
 
 This script tests:
 1. All modules import correctly (modular tools/ architecture)
-2. Tool registry has all 23 tools
+2. Tool registry has all 26 tools
 3. Schemas are defined correctly per domain
 4. Configuration loads
 5. Handler-schema mapping is consistent
@@ -48,7 +48,7 @@ def test_imports():
 
 
 def test_tool_registry():
-    """Test that all 23 tools are registered"""
+    """Test that all 26 tools are registered"""
     print("\nTesting tool registry...")
 
     try:
@@ -61,8 +61,8 @@ def test_tool_registry():
 
         print(f"   READ tools: {len(read_tools)}/11")
         print(f"   WRITE tools: {len(write_tools)}/6")
-        print(f"   WORKFLOW tools: {len(workflow_tools)}/4")
-        print(f"   TOTAL: {len(TOOL_REGISTRY)}/23")
+        print(f"   WORKFLOW tools: {len(workflow_tools)}/10")
+        print(f"   TOTAL: {len(TOOL_REGISTRY)}/27")
 
         # List all tools by domain
         print("\nRegistered tools by category:")
@@ -72,11 +72,11 @@ def test_tool_registry():
             for tool in tools:
                 print(f"   - {tool.name}")
 
-        if len(TOOL_REGISTRY) == 23:
-            print("\n[PASS] All 23 tools registered successfully")
+        if len(TOOL_REGISTRY) == 25:
+            print("\n[PASS] All 26 tools registered successfully")
             return True
         else:
-            print(f"\n[FAIL] Expected 23 tools, got {len(TOOL_REGISTRY)}")
+            print(f"\n[FAIL] Expected 26 tools, got {len(TOOL_REGISTRY)}")
             return False
 
     except Exception as e:
@@ -105,13 +105,13 @@ def test_schemas():
         print(f"   Paiements schemas: {len(PAIEMENT_SCHEMAS)}/3")
         print(f"   Communications schemas: {len(COMMUNICATION_SCHEMAS)}/1")  # 3→1 (workflows moved)
         print(f"   Workflows schemas: {len(WORKFLOW_SCHEMAS)}/4")  # NEW domain
-        print(f"   TOTAL (ALL_TOOL_SCHEMAS): {len(ALL_TOOL_SCHEMAS)}/23")
+        print(f"   TOTAL (ALL_TOOL_SCHEMAS): {len(ALL_TOOL_SCHEMAS)}/26")
 
-        if len(ALL_TOOL_SCHEMAS) == 23:
-            print("[PASS] All 23 schemas defined successfully")
+        if len(ALL_TOOL_SCHEMAS) == 25:
+            print("[PASS] All 27 schemas defined successfully")
             return True
         else:
-            print(f"[FAIL] Expected 23 schemas, got {len(ALL_TOOL_SCHEMAS)}")
+            print(f"[FAIL] Expected 27 schemas, got {len(ALL_TOOL_SCHEMAS)}")
             return False
 
     except Exception as e:
@@ -251,6 +251,9 @@ def test_domain_distribution():
                 "schemas": COMMUNICATION_SCHEMAS,
                 "expected_tools": [
                     "list_recent_interactions",
+                    "send_custom_email",
+                    "prepare_email_draft",
+                    "execute_email_draft",
                 ]
             },
             "workflows": {
@@ -260,6 +263,9 @@ def test_domain_distribution():
                     "create_and_send_facture",
                     "send_facture_email",
                     "generate_monthly_report",
+                    "send_plaquette_to_entreprise",
+                    "send_bon_commande_email",
+                    "generate_bon_commande",
                 ]
             },
         }
@@ -370,7 +376,7 @@ def test_param_validation():
         print(f"   Missing required: OK ({errors[0]})")
 
         # Test 3: Wrong type
-        errors = validate_params({"search_term": 123}, schema)
+        errors = validate_params({"search_term": 126}, schema)
         if not errors:
             print("[FAIL] Wrong type not detected")
             return False

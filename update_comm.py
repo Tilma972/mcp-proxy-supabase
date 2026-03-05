@@ -1,4 +1,4 @@
-"""
+content = '''"""
 Emails & notifications - Communications
 
 Schemas et handlers pour les communications :
@@ -212,3 +212,6 @@ COMMUNICATION_SCHEMAS = {
     "prepare_email_draft": PREPARE_EMAIL_DRAFT_SCHEMA,
     "execute_email_draft": EXECUTE_EMAIL_DRAFT_SCHEMA,
 }
+'''
+with open('tools/communications.py', 'w', encoding='utf-8') as f:
+    f.write(content)

@@ -261,15 +261,14 @@ async def some_handler():
 | `get_revenue_stats` | READ | Statistiques revenus par periode |
 | `mark_facture_paid` | WRITE | Marque facture comme payee |
 
-### communications.py - Emails & notifications (3 tools)
+### communications.py - Emails & notifications
 
 | Tool | Type | Description |
 |------|------|-------------|
 | `list_recent_interactions` | READ | Interactions recentes (Telegram) |
-| `send_facture_email` | WORKFLOW | Genere PDF + upload + envoie email |
-| `generate_monthly_report` | WORKFLOW | Rapport mensuel PDF avec stats |
+| `send_custom_email` | WORKFLOW | Envoie un email de notification personnalisé (HTML/Texte brut). L'IA rédige le message et utilise cet outil pour l'expédier via l'Email Worker|
 
-### workflows.py - Plaquette commerciale (1 tool)
+### workflows.py - Orchestrations / Plaquette commerciale (1 tool)
 
 | Tool | Type | Description |
 |------|------|-------------|
