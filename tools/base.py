@@ -207,8 +207,13 @@ async def call_document_worker(endpoint: str, payload: dict) -> dict:
 # ============================================================================
 
 @retry_with_backoff(max_attempts=3, base_delay=1.0)
-async def call_storage_worker(endpoint: str, payload: dict, use_form_data: bool = False) -> dict:
-    """Call the storage-worker service (file upload)"""
+async def call_storage_worker(
+    endpoint: str,
+    payload: Optional[dict] = None,
+    use_form_data: bool = False,
+    method: str = "POST"
+) -> dict:
+    """Call the storage-worker service (file upload/delete)"""
     if not settings.storage_worker_url:
         raise RuntimeError("STORAGE_WORKER_URL not configured")
 
@@ -220,15 +225,17 @@ async def call_storage_worker(endpoint: str, payload: dict, use_form_data: bool 
         "X-Request-ID": request_id_ctx.get()
     }
 
-    if not use_form_data:
+    if not use_form_data and method != "DELETE":
         headers["Content-Type"] = "application/json"
 
     logger.debug("storage_worker_call", endpoint=endpoint)
 
-    if use_form_data:
-        resp = await client.post(url, headers=headers, data=payload, timeout=30.0)
+    if method == "DELETE":
+        resp = await client.delete(url, headers=headers, timeout=30.0)
+    elif use_form_data:
+        resp = await client.post(url, headers=headers, data=payload or {}, timeout=30.0)
     else:
-        resp = await client.post(url, headers=headers, json=payload, timeout=30.0)
+        resp = await client.post(url, headers=headers, json=payload or {}, timeout=30.0)
     resp.raise_for_status()
 
     return resp.json()

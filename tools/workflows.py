@@ -37,6 +37,72 @@ from tools.factures import create_facture_handler
 logger = structlog.get_logger()
 
 
+def _format_workflow_error(exc: Exception) -> Dict[str, Any]:
+    if isinstance(exc, HTTPException):
+        return {
+            "type": type(exc).__name__,
+            "message": str(exc.detail),
+            "status_code": exc.status_code
+        }
+    return {
+        "type": type(exc).__name__,
+        "message": str(exc)
+    }
+
+
+async def _delete_storage_object(bucket: str, path: str) -> None:
+    await call_storage_worker(
+        f"/delete/{bucket}/{path}",
+        method="DELETE"
+    )
+
+
+async def _run_workflow_steps(steps: list, context: Dict[str, Any]) -> Dict[str, Any]:
+    results = []
+    completed = []
+
+    for step in steps:
+        try:
+            output = await step["action"](context)
+            if output:
+                context.update(output)
+            results.append({"step": step["name"], "status": "ok"})
+            completed.append(step)
+        except Exception as exc:
+            error = _format_workflow_error(exc)
+            results.append({"step": step["name"], "status": "failed", "error": error})
+
+            for done in reversed(completed):
+                compensate = done.get("compensate")
+                if not compensate:
+                    continue
+                try:
+                    await compensate(context)
+                    results.append({"step": done["name"], "status": "compensated"})
+                except Exception as cexc:
+                    results.append({
+                        "step": done["name"],
+                        "status": "compensation_failed",
+                        "error": _format_workflow_error(cexc)
+                    })
+
+            status = "partially_failed" if any(
+                r["status"] == "compensation_failed" for r in results
+            ) else "failed"
+            return {
+                "success": False,
+                "status": status,
+                "steps": results,
+                "error": error
+            }
+
+    return {
+        "success": True,
+        "status": "success",
+        "steps": results
+    }
+
+
 # ============================================================================
 # SCHEMAS
 # ============================================================================
@@ -226,44 +292,57 @@ async def generate_facture_pdf_handler(params: Dict[str, Any]):
 
     logger.info("workflow_generate_facture_pdf_start", facture_id=facture_id, force=force_regenerate)
 
+    steps = []
+    context: Dict[str, Any] = {"facture_id": facture_id}
+
     try:
-        # Step 1: Fetch invoice
         logger.debug("workflow_step_1_fetch_facture", facture_id=facture_id)
         facture_data = await call_supabase_rpc("get_facture_by_id", {"p_id": facture_id})
-
         if not facture_data or len(facture_data) == 0:
             raise HTTPException(status_code=404, detail=f"Facture {facture_id} not found")
+        steps.append({"step": "fetch_facture", "status": "ok"})
+    except Exception as exc:
+        error = _format_workflow_error(exc)
+        steps.append({"step": "fetch_facture", "status": "failed", "error": error})
+        return {"success": False, "status": "failed", "steps": steps, "error": error}
 
-        facture = facture_data[0] if isinstance(facture_data, list) else facture_data
+    facture = facture_data[0] if isinstance(facture_data, list) else facture_data
 
-        # Step 2: Check if PDF already exists
-        if not force_regenerate and facture.get("pdf_url") and facture.get("pdf_status") == "generated":
-            # For paid invoices, check acquittee URL specifically
-            payment_status = facture.get("payment_status", "pending")
-            is_paid = payment_status == "paid"
-            existing_url = facture.get("pdf_acquittee_url") if is_paid else facture.get("pdf_url")
-            if existing_url:
-                logger.info("workflow_pdf_already_exists", pdf_url=existing_url, is_paid=is_paid)
-                return {
-                    "success": True,
-                    "facture_id": facture_id,
-                    "pdf_url": existing_url,
-                    "pdf_status": "generated",
-                    "is_paid": is_paid,
-                    "message": "PDF already exists (use force_regenerate=true to regenerate)"
-                }
-
-        # Step 3: Determine payment flag for document-worker
+    if not force_regenerate and facture.get("pdf_url") and facture.get("pdf_status") == "generated":
         payment_status = facture.get("payment_status", "pending")
         is_paid = payment_status == "paid"
-        qualification_id = facture.get("qualification_id")
+        existing_url = facture.get("pdf_acquittee_url") if is_paid else facture.get("pdf_url")
+        if existing_url:
+            logger.info("workflow_pdf_already_exists", pdf_url=existing_url, is_paid=is_paid)
+            return {
+                "success": True,
+                "status": "success",
+                "steps": steps,
+                "facture_id": facture_id,
+                "pdf_url": existing_url,
+                "pdf_status": "generated",
+                "is_paid": is_paid,
+                "message": "PDF already exists (use force_regenerate=true to regenerate)"
+            }
 
-        if not qualification_id:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Facture {facture_id} has no qualification_id"
-            )
+    payment_status = facture.get("payment_status", "pending")
+    is_paid = payment_status == "paid"
+    qualification_id = facture.get("qualification_id")
+    if not qualification_id:
+        error = _format_workflow_error(
+            HTTPException(status_code=400, detail=f"Facture {facture_id} has no qualification_id")
+        )
+        steps.append({"step": "validate_facture", "status": "failed", "error": error})
+        return {"success": False, "status": "failed", "steps": steps, "error": error}
 
+    numero_facture = (
+        (facture.get("numero_facture") or "").strip()
+        or str(facture_id)
+    )
+    created_at = facture.get("created_at") or ""
+    year = str(created_at)[:4] if created_at else str(datetime.utcnow().year)
+
+    async def _generate_pdf(ctx: Dict[str, Any]) -> Dict[str, Any]:
         logger.debug(
             "workflow_step_3_generate_pdf",
             facture_id=facture_id,
@@ -271,8 +350,6 @@ async def generate_facture_pdf_handler(params: Dict[str, Any]):
             qualification_id=qualification_id,
             is_paid=is_paid
         )
-
-        # Call document-worker with current API schema (base64 API)
         pdf_result = await call_document_worker(
             "/generate/facture",
             {
@@ -282,37 +359,27 @@ async def generate_facture_pdf_handler(params: Dict[str, Any]):
                 "send_email": False
             }
         )
-
         pdf_base64 = pdf_result.get("pdf_base64")
-        # Use .strip() to handle empty strings ("" is truthy but useless)
-        numero_facture = (
-            (facture.get("numero_facture") or "").strip()
-            or pdf_result.get("facture_numero")
-            or str(facture_id)
-        )
-        created_at = facture.get("created_at") or ""
-        year = str(created_at)[:4] if created_at else str(datetime.utcnow().year)
-
         if not pdf_base64:
             raise HTTPException(
                 status_code=500,
                 detail="PDF generated but no pdf_base64 returned from document-worker"
             )
+        return {"pdf_base64": pdf_base64}
 
-        # Step 4: Upload PDF to storage-worker (base64 upload API)
-        # Paid invoices get a distinct filename to preserve the original emise PDF
+    async def _upload_pdf(ctx: Dict[str, Any]) -> Dict[str, Any]:
         if is_paid:
             filename = f"{numero_facture}_acquittee.pdf"
         else:
             filename = f"{numero_facture}.pdf"
-        # Combine year folder + filename into a single path
         storage_path = f"{year}/{filename}"
+
         upload_result = await call_storage_worker(
             "/upload/base64",
             {
                 "bucket": "factures",
                 "filename": filename,
-                "content": pdf_base64,
+                "content": ctx["pdf_base64"],
                 "content_type": "application/pdf",
                 "path": storage_path,
                 "upsert": "true",
@@ -322,55 +389,78 @@ async def generate_facture_pdf_handler(params: Dict[str, Any]):
         )
 
         pdf_url = upload_result.get("public_url") or upload_result.get("url") or upload_result.get("signed_url")
-
         if not pdf_url:
             raise HTTPException(
                 status_code=500,
                 detail="PDF uploaded but no URL returned from storage-worker"
             )
 
-        # Step 5: Update invoice status in DB
-        # Paid PDF → pdf_acquittee_url, emise PDF → pdf_url
+        ctx.pop("pdf_base64", None)
+        return {
+            "storage_bucket": "factures",
+            "storage_path": storage_path,
+            "pdf_url": pdf_url
+        }
+
+    async def _update_db(ctx: Dict[str, Any]) -> Dict[str, Any]:
         url_field = "pdf_acquittee_url" if is_paid else "pdf_url"
-        logger.debug("workflow_step_5_update_status", facture_id=facture_id, url_field=url_field, pdf_url=pdf_url)
+        logger.debug("workflow_step_5_update_status", facture_id=facture_id, url_field=url_field, pdf_url=ctx["pdf_url"])
         await call_database_worker(
             f"/facture/{facture_id}",
             {
                 "pdf_status": "generated",
-                url_field: pdf_url
+                url_field: ctx["pdf_url"]
             },
             method="PUT",
             require_validation=False
         )
+        return {}
 
-        logger.info(
-            "workflow_generate_facture_pdf_complete",
+    async def _rollback_upload(ctx: Dict[str, Any]) -> None:
+        bucket = ctx.get("storage_bucket")
+        path = ctx.get("storage_path")
+        if bucket and path:
+            await _delete_storage_object(bucket, path)
+
+    workflow_steps = [
+        {"name": "generate_pdf", "action": _generate_pdf},
+        {"name": "upload_pdf", "action": _upload_pdf, "compensate": _rollback_upload},
+        {"name": "update_db", "action": _update_db}
+    ]
+
+    workflow_result = await _run_workflow_steps(workflow_steps, context)
+    all_steps = steps + workflow_result["steps"]
+
+    if not workflow_result["success"]:
+        logger.error(
+            "workflow_generate_facture_pdf_failed",
             facture_id=facture_id,
-            pdf_url=pdf_url,
-            is_paid=is_paid
+            error=str(workflow_result.get("error"))
         )
-
         return {
-            "success": True,
+            **workflow_result,
+            "steps": all_steps,
             "facture_id": facture_id,
-            "pdf_url": pdf_url,
-            "pdf_status": "generated",
             "is_paid": is_paid,
             "numero_facture": numero_facture
         }
 
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(
-            "workflow_generate_facture_pdf_failed",
-            facture_id=facture_id,
-            error=str(e)
-        )
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to generate facture PDF: {str(e)}"
-        )
+    logger.info(
+        "workflow_generate_facture_pdf_complete",
+        facture_id=facture_id,
+        pdf_url=context.get("pdf_url"),
+        is_paid=is_paid
+    )
+
+    return {
+        **workflow_result,
+        "steps": all_steps,
+        "facture_id": facture_id,
+        "pdf_url": context.get("pdf_url"),
+        "pdf_status": "generated",
+        "is_paid": is_paid,
+        "numero_facture": numero_facture
+    }
 
 
 @register_tool(
@@ -392,30 +482,28 @@ async def create_and_send_facture_handler(params: Dict[str, Any]):
     """
     logger.info("workflow_create_and_send_facture_start")
 
-    try:
-        # HITL: Check if validation required
-        from utils.hitl import needs_hitl_validation, perform_human_validation
+    # HITL: Check if validation required
+    from utils.hitl import needs_hitl_validation, perform_human_validation
 
-        if await needs_hitl_validation("create_and_send_facture", params):
-            logger.info("workflow_hitl_validation_required")
+    if await needs_hitl_validation("create_and_send_facture", params):
+        logger.info("workflow_hitl_validation_required")
 
-            # Prepare validation context
-            validation_context = {
-                "montant": f"{params.get('montant', 0)} EUR",
-                "qualification_id": params.get("qualification_id"),
-                "description": params.get("description", "N/A")
-            }
+        validation_context = {
+            "montant": f"{params.get('montant', 0)} EUR",
+            "qualification_id": params.get("qualification_id"),
+            "description": params.get("description", "N/A")
+        }
 
-            # Pause workflow and request human validation
-            return await perform_human_validation(
-                workflow_name="create_and_send_facture",
-                tool_name="create_and_send_facture",
-                params=params,
-                validation_context=validation_context
-            )
+        return await perform_human_validation(
+            workflow_name="create_and_send_facture",
+            tool_name="create_and_send_facture",
+            params=params,
+            validation_context=validation_context
+        )
 
-        # Continue normal workflow if no validation required
-        # Step 1: Create invoice (import from factures domain - top-level import)
+    context: Dict[str, Any] = {}
+
+    async def _create_facture(ctx: Dict[str, Any]) -> Dict[str, Any]:
         logger.debug("workflow_step_1_create_facture")
         facture_result = await create_facture_handler({
             "qualification_id": params["qualification_id"],
@@ -424,53 +512,76 @@ async def create_and_send_facture_handler(params: Dict[str, Any]):
             "date_emission": params.get("date_emission"),
             "date_echeance": params.get("date_echeance")
         })
-
-        facture_id = facture_result.get("facture_id")
-
+        facture_id = facture_result.get("facture_id") or facture_result.get("id")
         if not facture_id:
             raise HTTPException(
                 status_code=500,
                 detail="Failed to create invoice: no facture_id returned"
             )
+        return {"facture_id": facture_id}
 
-        # Step 1b: Mark as paid if requested
-        if params.get("mark_as_paid", False):
-            logger.debug("workflow_step_1b_mark_as_paid", facture_id=facture_id)
-            await call_database_worker(
-                f"/facture/{facture_id}",
-                {
-                    "payment_status": "paid",
-                    "statut": "payee",
-                    "date_paiement": datetime.utcnow().date().isoformat()
-                },
-                method="PUT",
-                require_validation=False
-            )
-            logger.info("workflow_facture_marked_paid", facture_id=facture_id)
+    async def _mark_paid(ctx: Dict[str, Any]) -> Dict[str, Any]:
+        if not params.get("mark_as_paid", False):
+            return {}
+        facture_id = ctx["facture_id"]
+        logger.debug("workflow_step_1b_mark_as_paid", facture_id=facture_id)
+        await call_database_worker(
+            f"/facture/{facture_id}",
+            {
+                "payment_status": "paid",
+                "statut": "payee",
+                "date_paiement": datetime.utcnow().date().isoformat()
+            },
+            method="PUT",
+            require_validation=False
+        )
+        logger.info("workflow_facture_marked_paid", facture_id=facture_id)
+        return {}
 
-        # Step 2: Send (call local workflow handler - same file)
+    async def _send_facture(ctx: Dict[str, Any]) -> Dict[str, Any]:
+        facture_id = ctx["facture_id"]
         logger.debug("workflow_step_2_send_facture", facture_id=facture_id)
         send_result = await send_facture_email_handler({
             "facture_id": facture_id,
             "recipient_email": params.get("recipient_email"),
             "message": params.get("message")
         })
+        if not send_result.get("success", False):
+            detail = send_result.get("error", {}).get("message", "Failed to send facture email")
+            raise HTTPException(status_code=502, detail=detail)
+        return {"send_result": send_result}
 
-        logger.info("workflow_create_and_send_facture_complete", facture_id=facture_id)
+    workflow_steps = [
+        {"name": "create_facture", "action": _create_facture},
+        {"name": "mark_as_paid", "action": _mark_paid},
+        {"name": "send_facture", "action": _send_facture}
+    ]
 
-        return {
-            **send_result,
-            "facture_id": facture_id,
-            "created": True
-        }
-
-    except Exception as e:
+    workflow_result = await _run_workflow_steps(workflow_steps, context)
+    if not workflow_result["success"]:
         logger.error(
             "workflow_create_and_send_facture_error",
-            error=str(e),
-            error_type=type(e).__name__
+            error=str(workflow_result.get("error")),
+            error_type=type(workflow_result.get("error")).__name__
         )
-        raise
+        return {
+            **workflow_result,
+            "facture_id": context.get("facture_id"),
+            "created": bool(context.get("facture_id"))
+        }
+
+    logger.info("workflow_create_and_send_facture_complete", facture_id=context.get("facture_id"))
+
+    send_result = context.get("send_result", {})
+    return {
+        **workflow_result,
+        "facture_id": context.get("facture_id"),
+        "created": True,
+        "send_result": send_result,
+        "pdf_url": send_result.get("pdf_url"),
+        "email_sent": send_result.get("email_sent"),
+        "recipient": send_result.get("recipient")
+    }
 
 
 @register_tool(
@@ -498,106 +609,157 @@ async def send_facture_email_handler(params: Dict[str, Any]):
 
     logger.info("workflow_send_facture_email_start", facture_id=facture_id)
 
+    steps = []
+    context: Dict[str, Any] = {"facture_id": facture_id}
+
     try:
-        # Step 1: Fetch invoice
         logger.debug("workflow_step_1_fetch_facture", facture_id=facture_id)
-        facture = await call_supabase_rpc("get_facture_by_id", {"p_id": facture_id})
-
-        if not facture:
+        facture_data = await call_supabase_rpc("get_facture_by_id", {"p_id": facture_id})
+        if not facture_data:
             raise HTTPException(status_code=404, detail=f"Facture {facture_id} not found")
+        steps.append({"step": "fetch_facture", "status": "ok"})
+    except Exception as exc:
+        error = _format_workflow_error(exc)
+        steps.append({"step": "fetch_facture", "status": "failed", "error": error})
+        return {"success": False, "status": "failed", "steps": steps, "error": error}
 
-        # Step 2: Fetch email if not provided
+    facture = facture_data[0] if isinstance(facture_data, list) else facture_data
+    context["facture"] = facture
+
+    try:
         if not recipient_email:
             logger.debug("workflow_step_2_fetch_email", entreprise_id=facture.get("entreprise_id"))
             entreprise = await call_supabase_rpc(
                 "get_entreprise_by_id",
                 {"p_id": facture["entreprise_id"]}
             )
-            recipient_email = entreprise.get("email")
+            entreprise_data = entreprise[0] if isinstance(entreprise, list) else entreprise
+            recipient_email = entreprise_data.get("email")
+        if not recipient_email:
+            raise HTTPException(status_code=400, detail="No email address found for this company")
+        steps.append({"step": "resolve_email", "status": "ok"})
+    except Exception as exc:
+        error = _format_workflow_error(exc)
+        steps.append({"step": "resolve_email", "status": "failed", "error": error})
+        return {"success": False, "status": "failed", "steps": steps, "error": error}
 
-            if not recipient_email:
-                raise HTTPException(
-                    status_code=400,
-                    detail="No email address found for this company"
-                )
+    payment_status = facture.get("payment_status", "unpaid")
+    template = "facture_acquittee" if payment_status == "paid" else "facture_emise"
+    numero_facture = facture.get("numero", facture_id)
 
-        # Step 3: Determine template based on payment status
-        payment_status = facture.get("payment_status", "unpaid")
-        template = "facture_acquittee" if payment_status == "paid" else "facture_emise"
-
+    async def _generate_pdf(ctx: Dict[str, Any]) -> Dict[str, Any]:
         logger.debug(
             "workflow_step_3_generate_pdf",
             facture_id=facture_id,
             payment_status=payment_status,
             template=template
         )
-
-        # Call document-worker with current API schema (file_path API - different from generate_facture_pdf)
         pdf_result = await call_document_worker(
             "/generate/facture",
             {
                 "facture_id": facture_id,
-                "template": template  # facture_emise or facture_acquittee
+                "template": template
             }
         )
+        file_path = pdf_result.get("file_path")
+        if not file_path:
+            raise HTTPException(status_code=500, detail="PDF generated but no file_path returned")
+        return {"file_path": file_path}
 
-        # Step 4: Upload PDF (file_path upload API - different from generate_facture_pdf)
-        logger.debug("workflow_step_4_upload_pdf", file_path=pdf_result.get("file_path"))
+    async def _upload_pdf(ctx: Dict[str, Any]) -> Dict[str, Any]:
+        destination = f"factures/{numero_facture}.pdf"
+        logger.debug("workflow_step_4_upload_pdf", file_path=ctx["file_path"], destination=destination)
         upload_result = await call_storage_worker(
             "/upload",
             {
                 "bucket": "factures",
-                "file_path": pdf_result["file_path"],
-                "destination": f"factures/{facture.get('numero', facture_id)}.pdf"
+                "file_path": ctx["file_path"],
+                "destination": destination
             }
         )
 
-        # Step 5: Send email
+        pdf_url = upload_result.get("public_url") or upload_result.get("url") or upload_result.get("signed_url")
+        if not pdf_url:
+            raise HTTPException(status_code=500, detail="PDF uploaded but no URL returned from storage-worker")
+
+        return {
+            "storage_bucket": "factures",
+            "storage_path": destination,
+            "pdf_url": pdf_url
+        }
+
+    async def _send_email(ctx: Dict[str, Any]) -> Dict[str, Any]:
         logger.debug("workflow_step_5_send_email", recipient=recipient_email)
         email_result = await call_email_worker(
             "/send",
             {
                 "to": recipient_email,
-                "subject": f"Facture {facture.get('numero', facture_id)}",
+                "subject": f"Facture {numero_facture}",
                 "template": "facture",
                 "message": message,
-                "attachments": [upload_result["public_url"]]
+                "attachments": [ctx["pdf_url"]]
             }
         )
+        if not email_result.get("success", False):
+            detail = email_result.get("error") or "Email worker returned success=false"
+            raise HTTPException(status_code=502, detail=str(detail))
+        return {"email_sent": True}
 
-        # Step 6: Update invoice status
+    async def _update_db(ctx: Dict[str, Any]) -> Dict[str, Any]:
         logger.debug("workflow_step_6_update_status", facture_id=facture_id)
         await call_database_worker(
             f"/facture/{facture_id}",
             {
                 "pdf_status": "sent",
-                "pdf_url": upload_result["public_url"]
+                "pdf_url": ctx["pdf_url"]
             },
             method="PUT",
             require_validation=False
         )
+        return {}
 
-        logger.info(
-            "workflow_send_facture_email_complete",
-            facture_id=facture_id,
-            email_sent=email_result.get("success")
-        )
+    async def _rollback_upload(ctx: Dict[str, Any]) -> None:
+        bucket = ctx.get("storage_bucket")
+        path = ctx.get("storage_path")
+        if bucket and path:
+            await _delete_storage_object(bucket, path)
 
-        return {
-            "success": True,
-            "pdf_url": upload_result["public_url"],
-            "email_sent": email_result.get("success", False),
-            "recipient": recipient_email
-        }
+    workflow_steps = [
+        {"name": "generate_pdf", "action": _generate_pdf},
+        {"name": "upload_pdf", "action": _upload_pdf, "compensate": _rollback_upload},
+        {"name": "send_email", "action": _send_email},
+        {"name": "update_db", "action": _update_db}
+    ]
 
-    except Exception as e:
+    workflow_result = await _run_workflow_steps(workflow_steps, context)
+    all_steps = steps + workflow_result["steps"]
+
+    if not workflow_result["success"]:
         logger.error(
             "workflow_send_facture_email_error",
             facture_id=facture_id,
-            error=str(e),
-            error_type=type(e).__name__
+            error=str(workflow_result.get("error"))
         )
-        raise
+        return {
+            **workflow_result,
+            "steps": all_steps,
+            "recipient": recipient_email,
+            "facture_id": facture_id
+        }
+
+    logger.info(
+        "workflow_send_facture_email_complete",
+        facture_id=facture_id,
+        email_sent=context.get("email_sent", False)
+    )
+
+    return {
+        **workflow_result,
+        "steps": all_steps,
+        "pdf_url": context.get("pdf_url"),
+        "email_sent": context.get("email_sent", False),
+        "recipient": recipient_email
+    }
 
 
 @register_tool(
@@ -623,18 +785,26 @@ async def generate_monthly_report_handler(params: Dict[str, Any]):
 
     logger.info("workflow_generate_monthly_report_start", year=year, month=month)
 
+    steps = []
+    context: Dict[str, Any] = {"year": year, "month": month}
+
     try:
-        # Step 1: Calculate date range
         from datetime import date
         import calendar
 
         start_date = date(year, month, 1).isoformat()
         last_day = calendar.monthrange(year, month)[1]
         end_date = date(year, month, last_day).isoformat()
+        context["start_date"] = start_date
+        context["end_date"] = end_date
 
         logger.debug("workflow_step_1_date_range", start_date=start_date, end_date=end_date)
+    except Exception as exc:
+        error = _format_workflow_error(exc)
+        steps.append({"step": "date_range", "status": "failed", "error": error})
+        return {"success": False, "status": "failed", "steps": steps, "error": error}
 
-        # Step 2: Fetch stats and unpaid invoices in parallel
+    try:
         logger.debug("workflow_step_2_fetch_stats")
         stats, unpaid = await asyncio.gather(
             call_supabase_rpc("get_revenue_stats", {
@@ -643,73 +813,114 @@ async def generate_monthly_report_handler(params: Dict[str, Any]):
             }),
             call_supabase_rpc("get_unpaid_factures", {"p_limit": 100})
         )
+        context["stats"] = stats
+        context["unpaid"] = unpaid
+        steps.append({"step": "fetch_stats", "status": "ok"})
+    except Exception as exc:
+        error = _format_workflow_error(exc)
+        steps.append({"step": "fetch_stats", "status": "failed", "error": error})
+        return {"success": False, "status": "failed", "steps": steps, "error": error}
 
-        # Step 3: Generate PDF
+    async def _generate_pdf(ctx: Dict[str, Any]) -> Dict[str, Any]:
         logger.debug("workflow_step_3_generate_pdf")
         pdf_result = await call_document_worker(
             "/generate/report",
             {
                 "year": year,
                 "month": month,
-                "stats": stats,
-                "unpaid": unpaid
+                "stats": ctx["stats"],
+                "unpaid": ctx["unpaid"]
             }
         )
+        file_path = pdf_result.get("file_path")
+        if not file_path:
+            raise HTTPException(status_code=500, detail="Report generated but no file_path returned")
+        return {"file_path": file_path}
 
-        # Step 4: Upload PDF
-        logger.debug("workflow_step_4_upload_pdf")
+    async def _upload_pdf(ctx: Dict[str, Any]) -> Dict[str, Any]:
+        destination = f"reports/monthly_{year}_{month:02d}.pdf"
+        logger.debug("workflow_step_4_upload_pdf", destination=destination)
         upload_result = await call_storage_worker(
             "/upload",
             {
                 "bucket": "reports",
-                "file_path": pdf_result["file_path"],
-                "destination": f"reports/monthly_{year}_{month:02d}.pdf"
+                "file_path": ctx["file_path"],
+                "destination": destination
             }
         )
-
-        result = {
-            "success": True,
-            "pdf_url": upload_result["public_url"],
-            "year": year,
-            "month": month,
-            "stats": stats
+        pdf_url = upload_result.get("public_url") or upload_result.get("url") or upload_result.get("signed_url")
+        if not pdf_url:
+            raise HTTPException(status_code=500, detail="Report uploaded but no URL returned")
+        return {
+            "storage_bucket": "reports",
+            "storage_path": destination,
+            "pdf_url": pdf_url
         }
 
-        # Step 5: Optionally send email
-        if send_email:
-            if not recipient_email:
-                raise HTTPException(
-                    status_code=400,
-                    detail="recipient_email required when send_email=true"
-                )
+    async def _send_email(ctx: Dict[str, Any]) -> Dict[str, Any]:
+        if not send_email:
+            return {}
+        if not recipient_email:
+            raise HTTPException(status_code=400, detail="recipient_email required when send_email=true")
+        logger.debug("workflow_step_5_send_email", recipient=recipient_email)
+        email_result = await call_email_worker(
+            "/send",
+            {
+                "to": recipient_email,
+                "subject": f"Rapport mensuel {month}/{year}",
+                "template": "monthly_report",
+                "attachments": [ctx["pdf_url"]]
+            }
+        )
+        if not email_result.get("success", False):
+            detail = email_result.get("error") or "Email worker returned success=false"
+            raise HTTPException(status_code=502, detail=str(detail))
+        return {"email_sent": True}
 
-            logger.debug("workflow_step_5_send_email", recipient=recipient_email)
-            email_result = await call_email_worker(
-                "/send",
-                {
-                    "to": recipient_email,
-                    "subject": f"Rapport mensuel {month}/{year}",
-                    "template": "monthly_report",
-                    "attachments": [upload_result["public_url"]]
-                }
-            )
+    async def _rollback_upload(ctx: Dict[str, Any]) -> None:
+        bucket = ctx.get("storage_bucket")
+        path = ctx.get("storage_path")
+        if bucket and path:
+            await _delete_storage_object(bucket, path)
 
-            result["email_sent"] = email_result.get("success", False)
-            result["recipient"] = recipient_email
+    workflow_steps = [
+        {"name": "generate_pdf", "action": _generate_pdf},
+        {"name": "upload_pdf", "action": _upload_pdf, "compensate": _rollback_upload}
+    ]
+    if send_email:
+        workflow_steps.append({"name": "send_email", "action": _send_email})
 
-        logger.info("workflow_generate_monthly_report_complete", year=year, month=month)
+    workflow_result = await _run_workflow_steps(workflow_steps, context)
+    all_steps = steps + workflow_result["steps"]
 
-        return result
-
-    except Exception as e:
+    if not workflow_result["success"]:
         logger.error(
             "workflow_generate_monthly_report_error",
             year=year,
             month=month,
-            error=str(e),
-            error_type=type(e).__name__
+            error=str(workflow_result.get("error"))
         )
-        raise
+        return {
+            **workflow_result,
+            "steps": all_steps,
+            "year": year,
+            "month": month
+        }
+
+    logger.info("workflow_generate_monthly_report_complete", year=year, month=month)
+
+    result = {
+        **workflow_result,
+        "steps": all_steps,
+        "pdf_url": context.get("pdf_url"),
+        "year": year,
+        "month": month,
+        "stats": context.get("stats")
+    }
+    if send_email:
+        result["email_sent"] = context.get("email_sent", False)
+        result["recipient"] = recipient_email
+    return result
 
 
 @register_tool(
@@ -737,116 +948,144 @@ async def send_plaquette_to_entreprise_handler(params: Dict[str, Any]):
 
     logger.info("workflow_send_plaquette_start", entreprise_id=entreprise_id)
 
+    steps = []
+    context: Dict[str, Any] = {"entreprise_id": entreprise_id}
+
     try:
-        # Step 1: Fetch entreprise
         entreprise_list = await call_supabase_rpc("get_entreprise_by_id", {"p_id": entreprise_id})
         if not entreprise_list:
             raise HTTPException(status_code=404, detail=f"Entreprise {entreprise_id} not found")
         entreprise = entreprise_list[0] if isinstance(entreprise_list, list) else entreprise_list
+        steps.append({"step": "fetch_entreprise", "status": "ok"})
+    except Exception as exc:
+        error = _format_workflow_error(exc)
+        steps.append({"step": "fetch_entreprise", "status": "failed", "error": error})
+        return {"success": False, "status": "failed", "steps": steps, "error": error}
 
-        email = recipient_email or entreprise.get("email")
-        if not email:
-            raise HTTPException(
+    email = recipient_email or entreprise.get("email")
+    if not email:
+        error = _format_workflow_error(
+            HTTPException(
                 status_code=400,
                 detail=(
                     f"Entreprise '{entreprise.get('nom')}' n'a pas d'email en base. "
                     "Fournissez recipient_email pour forcer l'envoi."
                 )
             )
-
-        entreprise_nom = entreprise.get("nom", "")
-        contact_nom    = entreprise.get("contact_nom") or entreprise.get("contact") or ""
-
-        # Step 2: Determine type_client from qualification history
-        type_client      = "nouveau"
-        annee_precedente = None
-        format_precedent = None
-        try:
-            qualifs = await call_supabase_rpc("get_qualifications_by_entreprise", {
-                "p_entreprise_id": entreprise_id,
-                "p_limit": 5
-            })
-            if qualifs:
-                # Look for a paid/completed qualification
-                paid = [q for q in qualifs if q.get("statut") in ("Payé", "Terminé", "payee", "paid")]
-                if paid:
-                    type_client = "renouvellement"
-                    last = paid[0]
-                    created = last.get("created_at", "")
-                    annee_precedente = str(created)[:4] if created else None
-                    format_precedent = last.get("format_encart")
-        except Exception as e:
-            logger.warning("workflow_plaquette_qualif_fetch_failed", error=str(e))
-
-        logger.info(
-            "workflow_plaquette_context",
-            entreprise=entreprise_nom,
-            type_client=type_client,
-            email=email
         )
+        steps.append({"step": "resolve_email", "status": "failed", "error": error})
+        return {"success": False, "status": "failed", "steps": steps, "error": error}
+    steps.append({"step": "resolve_email", "status": "ok"})
 
-        # Step 3: Generate PDF
+    entreprise_nom = entreprise.get("nom", "")
+    contact_nom = entreprise.get("contact_nom") or entreprise.get("contact") or ""
+
+    type_client = "nouveau"
+    annee_precedente = None
+    format_precedent = None
+    try:
+        qualifs = await call_supabase_rpc("get_qualifications_by_entreprise", {
+            "p_entreprise_id": entreprise_id,
+            "p_limit": 5
+        })
+        if qualifs:
+            paid = [q for q in qualifs if q.get("statut") in ("Payé", "Terminé", "payee", "paid")]
+            if paid:
+                type_client = "renouvellement"
+                last = paid[0]
+                created = last.get("created_at", "")
+                annee_precedente = str(created)[:4] if created else None
+                format_precedent = last.get("format_encart")
+    except Exception as exc:
+        logger.warning("workflow_plaquette_qualif_fetch_failed", error=str(exc))
+
+    logger.info(
+        "workflow_plaquette_context",
+        entreprise=entreprise_nom,
+        type_client=type_client,
+        email=email
+    )
+
+    async def _generate_pdf(ctx: Dict[str, Any]) -> Dict[str, Any]:
         pdf_result = await call_document_worker(
             "/generate/plaquette",
             {
                 "request_id": request_id_ctx.get() or str(uuid.uuid4()),
-                "entreprise_nom":       entreprise_nom,
-                "contact_nom":          contact_nom,
-                "prospecteur_nom":      prospecteur_nom,
+                "entreprise_nom": entreprise_nom,
+                "contact_nom": contact_nom,
+                "prospecteur_nom": prospecteur_nom,
                 "prospecteur_telephone": prospecteur_tel,
-                "prospecteur_email":    prospecteur_eml,
-                "type_client":          type_client,
-                "annee_precedente":     annee_precedente,
-                "format_precedent":     format_precedent,
+                "prospecteur_email": prospecteur_eml,
+                "type_client": type_client,
+                "annee_precedente": annee_precedente,
+                "format_precedent": format_precedent,
             }
         )
-
         pdf_base64 = pdf_result.get("pdf_base64")
         if not pdf_base64:
             raise HTTPException(status_code=500, detail="Plaquette PDF generated but no pdf_base64 returned")
 
         safe_nom = (entreprise_nom or "generique").replace(" ", "_").replace("/", "-")[:40]
         filename = f"Plaquette_2027_{safe_nom}.pdf"
+        return {"pdf_base64": pdf_base64, "pdf_filename": filename}
 
-        # Step 4: Send email with PDF as base64 (no storage upload needed for plaquettes)
-        await call_email_worker(
+    async def _send_email(ctx: Dict[str, Any]) -> Dict[str, Any]:
+        email_result = await call_email_worker(
             "/send/plaquette",
             {
-                "to":                  email,
-                "entreprise_nom":      entreprise_nom,
-                "contact_nom":         contact_nom,
-                "type_client":         type_client,
-                "annee_precedente":    annee_precedente,
-                "format_precedent":    format_precedent,
-                "prospecteur_nom":     prospecteur_nom,
+                "to": email,
+                "entreprise_nom": entreprise_nom,
+                "contact_nom": contact_nom,
+                "type_client": type_client,
+                "annee_precedente": annee_precedente,
+                "format_precedent": format_precedent,
+                "prospecteur_nom": prospecteur_nom,
                 "prospecteur_telephone": prospecteur_tel,
-                "prospecteur_email":   prospecteur_eml,
-                "message":             message,
-                "pdf_base64":          pdf_base64,
-                "pdf_filename":        filename,
+                "prospecteur_email": prospecteur_eml,
+                "message": message,
+                "pdf_base64": ctx["pdf_base64"],
+                "pdf_filename": ctx["pdf_filename"],
             }
         )
+        if not email_result.get("success", False):
+            detail = email_result.get("error") or "Email worker returned success=false"
+            raise HTTPException(status_code=502, detail=str(detail))
+        ctx.pop("pdf_base64", None)
+        return {"email_sent": True}
 
-        logger.info(
-            "workflow_send_plaquette_complete",
-            entreprise=entreprise_nom,
-            email=email,
-            type_client=type_client
-        )
+    workflow_steps = [
+        {"name": "generate_pdf", "action": _generate_pdf},
+        {"name": "send_email", "action": _send_email}
+    ]
 
+    workflow_result = await _run_workflow_steps(workflow_steps, context)
+    all_steps = steps + workflow_result["steps"]
+
+    if not workflow_result["success"]:
+        logger.error("workflow_send_plaquette_error", entreprise_id=entreprise_id, error=str(workflow_result.get("error")))
         return {
-            "success":        True,
+            **workflow_result,
+            "steps": all_steps,
             "entreprise_nom": entreprise_nom,
-            "email":          email,
-            "type_client":    type_client,
-            "message":        f"Plaquette 2027 envoyée à {entreprise_nom} ({email})"
+            "email": email,
+            "type_client": type_client
         }
 
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error("workflow_send_plaquette_error", entreprise_id=entreprise_id, error=str(e))
-        raise HTTPException(status_code=500, detail=f"Failed to send plaquette: {str(e)}")
+    logger.info(
+        "workflow_send_plaquette_complete",
+        entreprise=entreprise_nom,
+        email=email,
+        type_client=type_client
+    )
+
+    return {
+        **workflow_result,
+        "steps": all_steps,
+        "entreprise_nom": entreprise_nom,
+        "email": email,
+        "type_client": type_client,
+        "message": f"Plaquette 2027 envoyee a {entreprise_nom} ({email})"
+    }
 
 
 
