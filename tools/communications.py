@@ -171,7 +171,7 @@ async def prepare_email_draft_handler(params: Dict[str, Any]):
         "title": params.get("title", params["subject"]),
         "use_template": params.get("use_template", True)
     }
-    draft_id = store_draft(payload)
+    draft_id = await store_draft(payload)
     return {
         "success": True,
         "draft_id": draft_id,
@@ -186,7 +186,7 @@ async def prepare_email_draft_handler(params: Dict[str, Any]):
 async def execute_email_draft_handler(params: Dict[str, Any]):
     draft_id = params["draft_id"]
     try:
-        payload = get_draft(draft_id)
+        payload = await get_draft(draft_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     
