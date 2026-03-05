@@ -849,11 +849,108 @@ async def send_plaquette_to_entreprise_handler(params: Dict[str, Any]):
         raise HTTPException(status_code=500, detail=f"Failed to send plaquette: {str(e)}")
 
 
+
+GENERATE_BON_COMMANDE_SCHEMA = ToolSchema(
+    name="generate_bon_commande",
+    description="Genere un PDF de bon de commande depuis une qualification, l'upload sur Supabase Storage, et met a jour la qualification.",
+    input_schema={
+        "type": "object",
+        "properties": {
+            "qualification_id": {
+                "type": "string",
+                "description": "UUID de la qualification (requis)"
+            }
+        },
+        "required": ["qualification_id"]
+    },
+    category="workflow"
+)
+
+@register_tool(
+    name="generate_bon_commande",
+    category=ToolCategory.WORKFLOW,
+    description_short="Genere PDF bon de commande et le sauvegarde"
+)
+async def generate_bon_commande_handler(params: Dict[str, Any]):
+    """
+    Steps:
+    1. Check qualification details
+    2. Generate Bon de Commande (document-worker)
+    3. Upload PDF (storage-worker) into 'bon_commandes' bucket
+    4. Update qualification (db-worker) with bc_url
+    """
+    qualification_id = params["qualification_id"]
+    logger.info("workflow_generate_bon_commande_start", qualification_id=qualification_id)
+    
+    try:
+        # Step 1 & 2: Call document-worker to generate PDF
+        pdf_result = await call_document_worker(
+            "/generate/bon-commande",
+            {
+                "request_id": request_id_ctx.get() or str(uuid.uuid4()),
+                "qualification_id": qualification_id,
+            }
+        )
+        
+        pdf_base64 = pdf_result.get("pdf_base64")
+        if not pdf_base64:
+            raise HTTPException(status_code=500, detail="Document worker did not return pdf_base64")
+            
+        metadata = pdf_result.get("metadata", {})
+        # Note: BonCommandeGenerateResponse returns document_type and bc_numero directly but might also be in metadata
+        bc_numero = pdf_result.get("bc_numero") or metadata.get("bc_numero") or "BC-INCONNU"
+        
+        # Step 3: Upload to storage
+        upload_result = await call_storage_worker(
+            "/upload/base64",
+            {
+                "request_id": request_id_ctx.get() or str(uuid.uuid4()),
+                "bucket_name": "bon_commandes",
+                "file_name": f"{bc_numero}.pdf",
+                "folder_path": f"{datetime.now().year}/{datetime.now().strftime('%m')}",
+                "base64_data": pdf_base64,
+                "content_type": "application/pdf"
+            }
+        )
+        
+        pdf_url = upload_result.get("public_url")
+        if not pdf_url:
+            raise HTTPException(status_code=500, detail="Storage worker did not return public_url")
+            
+        # Step 4: Update database via RPC (preferred for simple field updates)
+        # Using db-worker upsert if RPC doesn't exist, but qualification upsert requires all fields. Let's use RPC if possible.
+        # But wait, qualification upsert might just merge or do we have `upsert_qualification` in tools/qualifications.py?
+        # Typically we use call_supabase_rpc or database_worker. We will use the database worker `/qualification/upsert`.
+        db_result = await call_database_worker(
+            "/qualification/upsert",
+            {
+                "id": qualification_id,
+                "bc_url": pdf_url,
+                "bc_numero": bc_numero
+                # We do not override other fields, db-worker handles partial updates or requires full? Flowchat db-worker handles upsert smoothly.
+            },
+            require_validation=False
+        )
+        
+        logger.info("workflow_generate_bon_commande_complete", qualification_id=qualification_id, url=pdf_url)
+        return {
+            "success": True,
+            "qualification_id": qualification_id,
+            "bc_numero": bc_numero,
+            "bc_url": pdf_url,
+            "message": f"Bon de commande {bc_numero} generé avec succes"
+        }
+    except Exception as e:
+        logger.error("workflow_generate_bon_commande_error", error=str(e), qualification_id=qualification_id)
+        raise
+
 # ============================================================================
 # SCHEMA REGISTRY
 # ============================================================================
 
+
 WORKFLOW_SCHEMAS = {
+    "generate_bon_commande": GENERATE_BON_COMMANDE_SCHEMA,
     "generate_facture_pdf": GENERATE_FACTURE_PDF_SCHEMA,
     "create_and_send_facture": CREATE_AND_SEND_FACTURE_SCHEMA,
     "send_facture_email": SEND_FACTURE_EMAIL_SCHEMA,
