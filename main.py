@@ -31,12 +31,18 @@ from tools import ALL_TOOL_SCHEMAS, TOOL_DOMAINS
 # LOGGING
 # ============================================================================
 
+log_format = (settings.log_format or "json").lower() if settings else "json"
+log_renderer = (
+    structlog.dev.ConsoleRenderer()
+    if log_format == "console"
+    else structlog.processors.JSONRenderer()
+)
+
 structlog.configure(
     processors=[
         structlog.processors.add_log_level,
         structlog.processors.TimeStamper(fmt="%Y-%m-%d %H:%M:%S"),
-        structlog.processors.JSONRenderer() if settings.environment == "production" 
-        else structlog.dev.ConsoleRenderer()
+        log_renderer,
     ]
 )
 
@@ -409,7 +415,16 @@ async def proxy_rpc(
     )
 
     try:
-        result = await call_supabase_rpc(function_name, body)
+        from tools import ALL_TOOL_SCHEMAS
+        from tools_registry import dispatch_tool
+        
+        # Intercept and map parameters using the new Unified MCP tools
+        if function_name in ALL_TOOL_SCHEMAS:
+            logger.info("rpc_intercepted_by_unified_mcp_tool", function_name=function_name)
+            result = await dispatch_tool(function_name, body)
+        else:
+            # Fallback to direct raw Supabase RPC call
+            result = await call_supabase_rpc(function_name, body)
 
         duration = time.time() - start_time
         logger.info(
@@ -576,25 +591,33 @@ async def proxy_mcp(
         
         duration = time.time() - start_time
 
-        # 🆕 AJOUT : Log du contenu de la réponse pour debugging
+        response_data = None
+        result_count = "unknown"
         try:
             response_data = resp.json() if resp.content else None
-            response_preview = str(response_data)[:500] if response_data else "empty"
             result_count = len(response_data) if isinstance(response_data, list) else 1
-        except:
-            response_preview = resp.content[:500].decode('utf-8', errors='ignore')
-            result_count = "unknown"
+        except Exception:
+            pass
 
-        logger.info(
-            "mcp_request_completed",
-            path=path,
-            method=method,
-            status_code=resp.status_code,
-            duration_ms=int(duration * 1000),
-            client_ip=client_ip,
-            result_count=result_count,              # 🆕 Nombre de résultats
-            response_preview=response_preview       # 🆕 Aperçu de la réponse
-        )
+        log_payload = {
+            "path": path,
+            "method": method,
+            "status_code": resp.status_code,
+            "duration_ms": int(duration * 1000),
+            "client_ip": client_ip,
+            "result_count": result_count,
+        }
+
+        include_preview = bool(settings and (settings.log_response_preview or resp.status_code >= 400))
+        preview_chars = settings.log_response_preview_chars if settings else 200
+        if include_preview and preview_chars > 0:
+            if response_data is not None:
+                response_preview = str(response_data)[:preview_chars]
+            else:
+                response_preview = resp.content[:preview_chars].decode("utf-8", errors="ignore")
+            log_payload["response_preview"] = response_preview
+
+        logger.info("mcp_request_completed", **log_payload)
         
         return Response(
             content=resp.content,

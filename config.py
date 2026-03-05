@@ -45,6 +45,9 @@ class Settings(BaseSettings):
     # App
     environment: str = "production"
     log_level: str = "INFO"
+    log_format: str = "json"  # json | console
+    log_response_preview: bool = False
+    log_response_preview_chars: int = 200
 
     # CORS
     allowed_origins: str = "*"
