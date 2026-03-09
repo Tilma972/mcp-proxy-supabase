@@ -219,6 +219,41 @@ async def some_handler():
 - Reduced latency (no handshake overhead)
 - Max 100 connections, 20 keepalive
 
+### 6. Workflow Rollback (Saga Pattern)
+
+Workflows orchestration ensures transactional safety using the Saga pattern. If a step fails, prior steps are reverted.
+
+```python
+# tools/workflows.py
+try:
+    # Step 1: Storage Upload
+    pdf_url = await call_storage_worker(...)
+    # Step 2: Email sending
+    email_res = await call_email_worker(...) 
+except Exception as e:
+    # Rollback Storage Upload
+    await safe_storage_delete(...)
+    return {"status": "partially_failed", "details": ...}
+```
+
+**Why**: Solves the "orphaned file" problem when a downstream worker (like Email Worker) fails or goes offline, saving storage space and keeping the system state clean.
+
+### 7. Hybrid Cache Drafts Storage
+
+Interactive capabilities (bot requesting user confirmation) use a hybrid storage system:
+
+```python
+# utils/draft_store.py
+async def store_draft(draft_id, data):
+    # 1. Sync RAM Storage (fast read/write)
+    _DRAFTS[draft_id] = current_time
+    
+    # 2. Async DB fallback 
+    asyncio.create_task(db.table('mcp_email_drafts').insert(...))
+```
+
+**Why**: Prevents draft losses when the MCP proxy restarts due to auto-deployments. It ensures users can still load drafts days after their creation.
+
 ---
 
 ## Tool Domains (21 tools)
